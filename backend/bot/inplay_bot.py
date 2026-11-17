@@ -179,9 +179,8 @@ def place_orders(trading: TradingClient, picks: pd.DataFrame, today: pd.Timestam
 
 
 def day_orders(trading: TradingClient, status: QueryOrderStatus, today: pd.Timestamp) -> list:
-    start = today.tz_localize(ET)
-    return trading.get_orders(GetOrdersRequest(status=status, after=start.to_pydatetime(),
-                                               until=(start + timedelta(days=1)).to_pydatetime(), nested=True, limit=500))
+    from backend.bot.signal_bot import day_orders as all_orders  # pages past the 500-order limit
+    return all_orders(trading, today, status)
 
 
 def our_orders(trading: TradingClient, status: QueryOrderStatus, today: pd.Timestamp) -> list:

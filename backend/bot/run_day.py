@@ -1,0 +1,146 @@
+"""One process for the whole trading day: both paper-trading bots, minute by minute.
+
+  signal follower   runs the site's live signal engine on the 25 tickers and trades every signal
+                    it posts as it appears and ends (see signal_bot.py)
+  stocks in play    09:35 scan and breakout orders, 15:30 cancel, 15:55 close out (see inplay_bot.py)
+
+Everything is closed five minutes before the bell. The run can be cut in two
+(`--until 12:30`, then a second run for the afternoon); open signals are kept
+in a small database file that the second run picks up.
+
+Run:  python -m backend.bot.run_day
+      python -m backend.bot.run_day --until 12:30
+      python -m backend.bot.run_day report
+"""
+import ctypes
+import json
+import logging
+import sys
+import time
+from datetime import timedelta
+
+import pandas as pd
+from alpaca.trading.requests import GetCalendarRequest
+
+from backend import config, db
+from backend.bot import inplay_bot, signal_bot
+from backend.data.alpaca_data import ET
+from backend.engine.core import Engine, make_pool
+from backend.engine.live import LiveRunner
+
+DIR = inplay_bot.DIR
+log = logging.getLogger("day")
+
+
+def now() -> pd.Timestamp:
+    return pd.Timestamp.now(tz=ET)
+
+
+def guarded(label: str, fn, *args):
+    """One part failing must not stop the rest of the day."""
+    try:
+        return fn(*args)
+    except Exception:
+        log.exception("%s failed", label)
+
+
+def run(until: str = None):
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s",
+                        handlers=[logging.StreamHandler(), logging.FileHandler(DIR / f"day_{now():%Y-%m-%d}.log")])
+    for noisy in ("httpx", "urllib3", "alpaca"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    if hasattr(ctypes, "windll"):   # keep a Windows PC from idling to sleep while this process runs
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001)
+
+    trading = signal_bot.trading_client()
+    today = now().tz_localize(None).normalize()
+    cal = trading.get_calendar(GetCalendarRequest(start=today.date(), end=today.date()))
+    if not cal or pd.Timestamp(cal[0].date) != today:
+        log.info("market is closed today; nothing to do")
+        return
+    opens, closes = pd.Timestamp(cal[0].open, tz=ET), pd.Timestamp(cal[0].close, tz=ET)
+    stop_at = today.tz_localize(ET) + pd.Timedelta(until + ":00") if until else None
+    if now() >= closes:
+        log.info("market already closed")
+        return
+    equity = float(trading.get_account().equity)
+    log.info("paper account equity $%.2f; session %s to %s ET", equity, f"{opens:%H:%M}", f"{closes:%H:%M}")
+
+    # Stocks in play: the baseline must be ready before 09:35
+    scan_at = opens + timedelta(minutes=5)
+    prep = None
+    if now() < scan_at - timedelta(minutes=1) and not inplay_bot.plan_from_orders(trading, today):
+        prep = guarded("stocks-in-play baseline", inplay_bot.prepare, trading, today)
+
+    # Signal follower: the site's own engine, with its open signals kept in a file
+    db.connect(DIR / f"signals_{today:%Y-%m-%d}.db")
+    engine = Engine(make_pool())
+    live = LiveRunner(engine, None)
+    symbols = config.TRAIN_TICKERS
+    log.info("signal engine ready: %d tickers, models for %s", len(symbols), sorted(engine.models))
+
+    done = {"scan": prep is None, "cancel": False, "flatten": False}
+    while True:
+        boundary = now().floor("min") + pd.Timedelta(minutes=1)
+        time.sleep(max((boundary - now()).total_seconds() + 2, 0))
+        if boundary <= opens:
+            continue
+
+        # 09:35: stocks in play goes first, its orders are the time-critical ones
+        if not done["scan"] and boundary >= scan_at:
+            done["scan"] = True
+            if boundary <= scan_at + timedelta(minutes=inplay_bot.LATEST_START_MIN):
+                picks = guarded("stocks-in-play scan", inplay_bot.pick, prep, today)
+                if picks is not None:
+                    plan = guarded("stocks-in-play orders", inplay_bot.place_orders, trading, picks, today)
+                    if plan:
+                        (DIR / f"plan_{today:%Y-%m-%d}.json").write_text(json.dumps(plan, indent=2))
+            else:
+                log.info("too late for today's stocks-in-play entries")
+
+        # Every minute: update the signal engine and act on what it says
+        try:
+            live.refresh(config.CONTEXT_TICKERS + symbols, boundary)
+            for event in engine.on_minute(boundary, symbols):
+                guarded("signal order", signal_bot.handle, trading, event, equity)
+        except Exception:
+            log.exception("signal engine error at %s", f"{boundary:%H:%M}")
+
+        if not done["cancel"] and boundary >= closes - timedelta(minutes=30):
+            done["cancel"] = True
+            guarded("stocks-in-play cancel", inplay_bot.cancel_untriggered, trading, today)
+        if not done["flatten"] and boundary >= closes - timedelta(minutes=5):
+            done["flatten"] = True
+            guarded("stocks-in-play close-out", inplay_bot.flatten, trading, inplay_bot.plan_from_orders(trading, today), today)
+            guarded("signal close-out", signal_bot.finish_all, trading, today)
+        if boundary >= closes:
+            break
+        if stop_at is not None and boundary >= stop_at:
+            log.info("handing over to the afternoon run; open trades keep their stops and targets")
+            return
+
+    time.sleep(45)
+    guarded("signal close-out", signal_bot.finish_all, trading, today)
+    guarded("stocks-in-play results", inplay_bot.record, trading, inplay_bot.plan_from_orders(trading, today), today)
+    posted = db.query("SELECT COUNT(*) AS n, AVG(result_r) AS r FROM signals WHERE result_r IS NOT NULL")[0]
+    log.info("site's own scoring of today's signals: %s finished, average %sR", posted["n"],
+             None if posted["r"] is None else round(posted["r"], 3))
+    report()
+
+
+def report():
+    print("=" * 30, "STOCKS IN PLAY", "=" * 30)
+    guarded("stocks-in-play report", inplay_bot.report)
+    print()
+    print("=" * 30, "SIGNAL FOLLOWER", "=" * 30)
+    guarded("signal report", signal_bot.report, None, False)
+    print(f"\nAccount equity: ${signal_bot.trading_client().get_account().equity}")
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if args[:1] == ["report"]:
+        logging.basicConfig(level=logging.WARNING)
+        report()
+    else:
+        run(args[args.index("--until") + 1] if "--until" in args else None)

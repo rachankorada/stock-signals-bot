@@ -1,0 +1,304 @@
+{
+  "timeframe": 3,
+  "trained_through": "2026-11-13 15:39:00-05:00",
+  "validated": false,
+  "p_min": 0.5,
+  "strategies": {
+    "opening_range_breakout": {
+      "trades": 2,
+      "win_rate": 1.0,
+      "expectancy_r": 0.9607,
+      "profit_factor": null,
+      "avg_cost_r": 0.026,
+      "enabled": false
+    },
+    "vwap_trend_pullback": {
+      "trades": 12232,
+      "win_rate": 0.4959,
+      "expectancy_r": -0.0636,
+      "profit_factor": 0.878,
+      "avg_cost_r": 0.078,
+      "enabled": false
+    },
+    "vwap_mean_reversion": {
+      "trades": 38,
+      "win_rate": 0.5,
+      "expectancy_r": -0.1212,
+      "profit_factor": 0.787,
+      "avg_cost_r": 0.117,
+      "enabled": false
+    },
+    "momentum_breakout": {
+      "trades": 2394,
+      "win_rate": 0.4946,
+      "expectancy_r": -0.105,
+      "profit_factor": 0.809,
+      "avg_cost_r": 0.12,
+      "enabled": false
+    },
+    "squeeze_breakout": {
+      "trades": 3595,
+      "win_rate": 0.491,
+      "expectancy_r": -0.107,
+      "profit_factor": 0.805,
+      "avg_cost_r": 0.112,
+      "enabled": false
+    },
+    "rsi_reversal": {
+      "trades": 6271,
+      "win_rate": 0.5058,
+      "expectancy_r": -0.1101,
+      "profit_factor": 0.8,
+      "avg_cost_r": 0.128,
+      "enabled": false
+    },
+    "ema_trend_continuation": {
+      "trades": 428,
+      "win_rate": 0.5047,
+      "expectancy_r": -0.0079,
+      "profit_factor": 0.984,
+      "avg_cost_r": 0.057,
+      "enabled": false
+    },
+    "prior_day_level": {
+      "trades": 3017,
+      "win_rate": 0.5025,
+      "expectancy_r": -0.0497,
+      "profit_factor": 0.904,
+      "avg_cost_r": 0.079,
+      "enabled": false
+    }
+  },
+  "sweep": [
+    {
+      "threshold": 0.4,
+      "trades": 175888,
+      "win_rate": 0.4748,
+      "expectancy_r": -0.1006,
+      "profit_factor": 0.812,
+      "avg_cost_r": 0.101
+    },
+    {
+      "threshold": 0.45,
+      "trades": 148819,
+      "win_rate": 0.4839,
+      "expectancy_r": -0.1015,
+      "profit_factor": 0.812,
+      "avg_cost_r": 0.103
+    },
+    {
+      "threshold": 0.5,
+      "trades": 27977,
+      "win_rate": 0.4983,
+      "expectancy_r": -0.0808,
+      "profit_factor": 0.849,
+      "avg_cost_r": 0.097
+    },
+    {
+      "threshold": 0.55,
+      "trades": 224,
+      "win_rate": 0.4464,
+      "expectancy_r": -0.1645,
+      "profit_factor": 0.711,
+      "avg_cost_r": 0.106
+    },
+    {
+      "threshold": 0.6,
+      "trades": 46,
+      "win_rate": 0.3696,
+      "expectancy_r": -0.2938,
+      "profit_factor": 0.521,
+      "avg_cost_r": 0.119
+    },
+    {
+      "threshold": 0.65,
+      "trades": 0
+    },
+    {
+      "threshold": 0.7,
+      "trades": 0
+    }
+  ],
+  "backtest": {
+    "all": {
+      "trades": 27977,
+      "win_rate": 0.4983,
+      "expectancy_r": -0.0808,
+      "profit_factor": 0.849,
+      "avg_cost_r": 0.097
+    },
+    "one_per_ticker": {
+      "trades": 20522,
+      "win_rate": 0.4984,
+      "expectancy_r": -0.0852,
+      "profit_factor": 0.841,
+      "avg_cost_r": 0.101
+    },
+    "earlier": {
+      "trades": 24433,
+      "win_rate": 0.5003,
+      "expectancy_r": -0.0778,
+      "profit_factor": 0.854,
+      "avg_cost_r": 0.099
+    },
+    "final_six_months": {
+      "trades": 3544,
+      "win_rate": 0.4839,
+      "expectancy_r": -0.1016,
+      "profit_factor": 0.814,
+      "avg_cost_r": 0.087
+    },
+    "per_day": 27.22,
+    "by_year": [
+      {
+        "year": 2023,
+        "trades": 178,
+        "win_rate": 0.5225,
+        "expectancy_r": -0.0481,
+        "profit_factor": 0.905,
+        "avg_cost_r": 0.116
+      },
+      {
+        "year": 2024,
+        "trades": 11101,
+        "win_rate": 0.5028,
+        "expectancy_r": -0.0837,
+        "profit_factor": 0.843,
+        "avg_cost_r": 0.114
+      },
+      {
+        "year": 2025,
+        "trades": 10272,
+        "win_rate": 0.4988,
+        "expectancy_r": -0.0746,
+        "profit_factor": 0.86,
+        "avg_cost_r": 0.088
+      },
+      {
+        "year": 2026,
+        "trades": 6426,
+        "win_rate": 0.4888,
+        "expectancy_r": -0.0864,
+        "profit_factor": 0.839,
+        "avg_cost_r": 0.082
+      }
+    ],
+    "start": "2023-11-13",
+    "end": "2026-11-13"
+  },
+  "history": {
+    "opening_range_breakout": {
+      "trades": 2,
+      "win_rate": 1.0,
+      "expectancy_r": 0.9607,
+      "profit_factor": null,
+      "avg_cost_r": 0.026
+    },
+    "vwap_trend_pullback": {
+      "trades": 12232,
+      "win_rate": 0.4959,
+      "expectancy_r": -0.0636,
+      "profit_factor": 0.878,
+      "avg_cost_r": 0.078
+    },
+    "vwap_mean_reversion": {
+      "trades": 38,
+      "win_rate": 0.5,
+      "expectancy_r": -0.1212,
+      "profit_factor": 0.787,
+      "avg_cost_r": 0.117
+    },
+    "momentum_breakout": {
+      "trades": 2394,
+      "win_rate": 0.4946,
+      "expectancy_r": -0.105,
+      "profit_factor": 0.809,
+      "avg_cost_r": 0.12
+    },
+    "squeeze_breakout": {
+      "trades": 3595,
+      "win_rate": 0.491,
+      "expectancy_r": -0.107,
+      "profit_factor": 0.805,
+      "avg_cost_r": 0.112
+    },
+    "rsi_reversal": {
+      "trades": 6271,
+      "win_rate": 0.5058,
+      "expectancy_r": -0.1101,
+      "profit_factor": 0.8,
+      "avg_cost_r": 0.128
+    },
+    "ema_trend_continuation": {
+      "trades": 428,
+      "win_rate": 0.5047,
+      "expectancy_r": -0.0079,
+      "profit_factor": 0.984,
+      "avg_cost_r": 0.057
+    },
+    "prior_day_level": {
+      "trades": 3017,
+      "win_rate": 0.5025,
+      "expectancy_r": -0.0497,
+      "profit_factor": 0.904,
+      "avg_cost_r": 0.079
+    }
+  },
+  "calibration": [
+    {
+      "bucket": "(-0.001, 0.1]",
+      "n": 508,
+      "predicted": 0.054,
+      "actual": 0.096
+    },
+    {
+      "bucket": "(0.1, 0.2]",
+      "n": 3020,
+      "predicted": 0.156,
+      "actual": 0.184
+    },
+    {
+      "bucket": "(0.2, 0.3]",
+      "n": 8215,
+      "predicted": 0.261,
+      "actual": 0.279
+    },
+    {
+      "bucket": "(0.3, 0.4]",
+      "n": 51289,
+      "predicted": 0.354,
+      "actual": 0.355
+    },
+    {
+      "bucket": "(0.4, 0.5]",
+      "n": 147948,
+      "predicted": 0.468,
+      "actual": 0.47
+    },
+    {
+      "bucket": "(0.5, 0.6]",
+      "n": 27888,
+      "predicted": 0.51,
+      "actual": 0.499
+    },
+    {
+      "bucket": "(0.6, 0.7]",
+      "n": 46,
+      "predicted": 0.643,
+      "actual": 0.37
+    }
+  ],
+  "raw": {
+    "trades": 238914,
+    "win_rate": 0.4379,
+    "expectancy_r": -0.0969,
+    "profit_factor": 0.811,
+    "avg_cost_r": 0.094
+  },
+  "geometry": {
+    "tp1_r": 1.0,
+    "tp2_r": 2.0,
+    "stop_min_atr": 1.0,
+    "stop_max_atr": 2.5
+  }
+}
