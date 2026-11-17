@@ -29,8 +29,8 @@ from backend.data.alpaca_data import ET
 PREFIX = "sig"
 RISK_DOLLARS = float(os.environ.get("BOT_RISK_DOLLARS", "1000"))  # intended loss if a trade is stopped out
 # Cap on one trade's size, as a share of account equity. Very tight stops would otherwise ask for huge
-# positions. At 25%, four trades can be open together within the account's 2x buying power.
-MAX_POSITION_FRAC = float(os.environ.get("BOT_MAX_POSITION_FRAC", "0.25"))
+# positions. At 10%, about ten trades can be open together alongside the stocks-in-play orders.
+MAX_POSITION_FRAC = float(os.environ.get("BOT_MAX_POSITION_FRAC", "0.10"))
 FIRST_DAY = "2026-11-17"
 OPEN = ("new", "accepted", "held", "partially_filled", "pending_new", "accepted_for_bidding")
 
@@ -42,8 +42,9 @@ def trading_client() -> TradingClient:
 
 
 def order_id(sig: dict) -> str:
-    day = pd.Timestamp(sig["created_at"]).tz_convert(ET)
-    return f"{PREFIX}-{day:%Y%m%d}-{sig['id']}-{sig['timeframe']}-{int(round(sig['risk'] * 10000))}"
+    # The signal's time leads its number, so a restarted run (whose numbers start again at 1) cannot reuse an id
+    at = pd.Timestamp(sig["created_at"]).tz_convert(ET)
+    return f"{PREFIX}-{at:%Y%m%d}-{at:%H%M}{sig['id']:04d}-{sig['timeframe']}-{int(round(sig['risk'] * 10000))}"
 
 
 def day_orders(trading: TradingClient, today: pd.Timestamp, status=QueryOrderStatus.ALL, symbol=None) -> list:
@@ -69,15 +70,19 @@ def place(trading: TradingClient, sig: dict, equity: float):
     if qty < 1:
         log.info("signal %s %s: size rounds to zero, skipped", sig["id"], sym)
         return
-    # Leave a ticker alone while the other bot is in it
-    others = [o for o in trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[sym], limit=100))
-              if not (o.client_order_id or "").startswith(PREFIX)]
+    # Leave a ticker alone while the stocks-in-play strategy is in it (nested, so this bot's own stop and
+    # target orders sit inside their entry order and are not mistaken for the other strategy's)
+    others = [o for o in trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, symbols=[sym], limit=100,
+                                                             nested=True))
+              if (o.client_order_id or "").startswith("inplay")]
     if others:
         log.info("signal %s %s: ticker in use by the other strategy, skipped", sig["id"], sym)
         return
     try:
         trading.submit_order(MarketOrderRequest(
-            symbol=sym, qty=qty, side=OrderSide.BUY if d > 0 else OrderSide.SELL, time_in_force=TimeInForce.DAY,
+            # Good till cancelled: if neither level is hit by the close, the trade is held overnight with its
+            # stop and target still working
+            symbol=sym, qty=qty, side=OrderSide.BUY if d > 0 else OrderSide.SELL, time_in_force=TimeInForce.GTC,
             order_class=OrderClass.BRACKET, client_order_id=order_id(sig),
             take_profit=TakeProfitRequest(limit_price=round(sig["tp1"], 2)),
             stop_loss=StopLossRequest(stop_price=round(sig["stop"], 2))))
@@ -89,28 +94,30 @@ def place(trading: TradingClient, sig: dict, equity: float):
 
 
 def close_out(trading: TradingClient, parent):
-    """Make sure one signal's trade is finished: cancel what is left of it and exit at market."""
+    """Make sure one signal's trade is finished: cancel what is left of it and exit whatever is still held."""
     if parent.status.value in OPEN and float(parent.filled_qty or 0) == 0:
         trading.cancel_order_by_id(parent.id)
         return
+    if float(parent.filled_qty or 0) == 0:
+        return
     live = [leg for leg in (parent.legs or []) if leg.status.value in OPEN]
-    if not live or float(parent.filled_qty or 0) == 0:
-        return  # already closed by its stop or target
     for leg in live:
         try:
             trading.cancel_order_by_id(leg.id)
         except Exception:
             pass
-    nested = GetOrderByIdRequest(nested=True)
+    fresh = parent
     for _ in range(10):  # the shares are only free to sell once the cancels have gone through
-        time.sleep(0.5)
-        fresh = trading.get_order_by_id(parent.id, filter=nested)
+        fresh = trading.get_order_by_id(parent.id, filter=GetOrderByIdRequest(nested=True))
         if not any(leg.status.value in OPEN for leg in (fresh.legs or [])):
             break
-    if any(float(leg.filled_qty or 0) > 0 for leg in (fresh.legs or [])):
-        return  # the stop or target filled while we were cancelling
+        time.sleep(0.5)
+    # A stop or target can fill only part of the way, so exit exactly what is still held
+    remaining = float(fresh.filled_qty) - sum(float(leg.filled_qty or 0) for leg in (fresh.legs or []))
+    if remaining < 1:
+        return
     trading.submit_order(MarketOrderRequest(
-        symbol=parent.symbol, qty=float(parent.filled_qty), time_in_force=TimeInForce.DAY,
+        symbol=parent.symbol, qty=remaining, time_in_force=TimeInForce.DAY,
         side=OrderSide.SELL if parent.side == OrderSide.BUY else OrderSide.BUY,
         client_order_id=parent.client_order_id.replace(PREFIX + "-", PREFIX + "x-", 1)))
 
@@ -129,22 +136,40 @@ def finish(trading: TradingClient, sig: dict):
             return
 
 
+def at_day_end(sig: dict) -> bool:
+    """Did the site end this signal only because the trading day was ending?"""
+    closed = pd.Timestamp(sig["closed_at"]).tz_convert(ET)
+    return closed.hour * 60 + closed.minute >= 16 * 60 - config.FLATTEN_BEFORE_CLOSE_MIN
+
+
 def handle(trading: TradingClient, event: dict, equity: float):
     sig = event["signal"]
     if event["type"] == "signal":
         place(trading, sig, equity)
     elif sig.get("closed_at"):
+        if sig["status"] == "expired" and at_day_end(sig):
+            log.info("signal %s %s: no level hit by the close, held overnight with its stop and target", sig["id"], sig["symbol"])
+            return
         finish(trading, sig)
 
 
-def finish_all(trading: TradingClient, today: pd.Timestamp):
-    """End of day: nothing from this bot stays open."""
+def end_of_day(trading: TradingClient, today: pd.Timestamp):
+    """At the close: trades still waiting on their stop or target stay open overnight. Only a position
+    left with nothing protecting it (for example after a partial fill) is closed."""
+    held = 0
     for parent in day_orders(trading, today):
-        if (parent.client_order_id or "").startswith(PREFIX + "-"):
-            try:
-                close_out(trading, parent)
-            except Exception as exc:
-                log.warning("%s: could not close out: %s", parent.symbol, str(exc)[:200])
+        if not (parent.client_order_id or "").startswith(PREFIX + "-"):
+            continue
+        try:
+            if parent.status.value in OPEN and float(parent.filled_qty or 0) == 0:
+                trading.cancel_order_by_id(parent.id)
+            elif any(leg.status.value in OPEN for leg in (parent.legs or [])):
+                held += 1
+            else:
+                close_out(trading, parent)  # exits any unprotected remainder
+        except Exception as exc:
+            log.warning("%s: end-of-day check failed: %s", parent.symbol, str(exc)[:200])
+    log.info("%d signal trades held overnight with their stop and target working", held)
 
 
 def day_trades(trading: TradingClient, today: pd.Timestamp) -> pd.DataFrame:

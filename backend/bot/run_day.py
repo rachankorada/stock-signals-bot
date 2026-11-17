@@ -4,7 +4,8 @@
                     it posts as it appears and ends (see signal_bot.py)
   stocks in play    09:35 scan and breakout orders, 15:30 cancel, 15:55 close out (see inplay_bot.py)
 
-Everything is closed five minutes before the bell. The run can be cut in two
+Stocks-in-play trades are closed five minutes before the bell; signal trades that have hit neither
+level are held overnight with their stop and target working. The run can be cut in two
 (`--until 12:30`, then a second run for the afternoon); open signals are kept
 in a small database file that the second run picks up.
 
@@ -76,7 +77,7 @@ def run(until: str = None):
     db.connect(DIR / f"signals_{today:%Y-%m-%d}.db")
     engine = Engine(make_pool())
     live = LiveRunner(engine, None)
-    symbols = config.TRAIN_TICKERS
+    symbols = config.BOT_TICKERS
     log.info("signal engine ready: %d tickers, models for %s", len(symbols), sorted(engine.models))
 
     done = {"scan": prep is None, "cancel": False, "flatten": False}
@@ -112,7 +113,7 @@ def run(until: str = None):
         if not done["flatten"] and boundary >= closes - timedelta(minutes=5):
             done["flatten"] = True
             guarded("stocks-in-play close-out", inplay_bot.flatten, trading, inplay_bot.plan_from_orders(trading, today), today)
-            guarded("signal close-out", signal_bot.finish_all, trading, today)
+            guarded("signal end of day", signal_bot.end_of_day, trading, today)
         if boundary >= closes:
             break
         if stop_at is not None and boundary >= stop_at:
@@ -120,7 +121,7 @@ def run(until: str = None):
             return
 
     time.sleep(45)
-    guarded("signal close-out", signal_bot.finish_all, trading, today)
+    guarded("signal end of day", signal_bot.end_of_day, trading, today)
     guarded("stocks-in-play results", inplay_bot.record, trading, inplay_bot.plan_from_orders(trading, today), today)
     posted = db.query("SELECT COUNT(*) AS n, AVG(result_r) AS r FROM signals WHERE result_r IS NOT NULL")[0]
     log.info("site's own scoring of today's signals: %s finished, average %sR", posted["n"],

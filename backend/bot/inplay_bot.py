@@ -40,16 +40,17 @@ from alpaca.trading.requests import GetCalendarRequest, GetOrdersRequest, Market
 
 from backend import config
 from backend.data.alpaca_data import ET, client
-from backend.research.in_play import CHUNK, LOOKBACK, MIN_ATR, MIN_AVG_VOLUME, MIN_PRICE, TOP_N
+from backend.research.in_play import CHUNK, LOOKBACK, MIN_ATR, MIN_AVG_VOLUME, MIN_PRICE
 from backend.research.universe import candidates
 
 DIR = config.DATA_DIR / "bot"
 DIR.mkdir(parents=True, exist_ok=True)
 STOP_FRAC = 0.10            # stop distance as a share of the 14-day average daily range
 from backend.bot.signal_bot import RISK_DOLLARS  # noqa: E402  (one risk setting for both bots)
-# 20 entry orders sit in the account at once and Alpaca sets buying power aside for each, so these stay
-# small (20 x 5% = the whole account) and leave the other half of buying power to the signal follower
-MAX_POSITION_FRAC = 0.05
+TOP_N = 40                  # candidates traded per day (the backtest used 20)
+# 40 entry orders sit in the account at once and Alpaca sets buying power aside for each, so these stay
+# small (40 x 2.5% = the account's equity) and leave the other half of buying power to the signal follower
+MAX_POSITION_FRAC = 0.025
 MIN_USUAL_OPEN_VOLUME = 300  # IEX shares; below this the relative-volume ratio is noise
 LATEST_START_MIN = 8        # minutes after 09:35 beyond which the day's entries are skipped
 PREFIX = "inplay"
@@ -212,8 +213,27 @@ def cancel_untriggered(trading: TradingClient, today: pd.Timestamp):
     log.info("cancelled entries that never triggered")
 
 
+EXIT_PREFIX = "ipx"   # this strategy's own market exits
+
+
+def held_by_us(trading: TradingClient, today: pd.Timestamp) -> dict:
+    """Shares this strategy still holds per ticker (signed), from its own orders only, so a signal
+    trade in the same ticker is never touched."""
+    held = {}
+    for o in day_orders(trading, QueryOrderStatus.ALL, today):
+        cid = o.client_order_id or ""
+        if cid.startswith(f"{PREFIX}-{today:%Y%m%d}-"):
+            d = 1 if o.side == OrderSide.BUY else -1
+            out = sum(float(leg.filled_qty or 0) for leg in (o.legs or []))
+            held[o.symbol] = held.get(o.symbol, 0.0) + d * (float(o.filled_qty or 0) - out)
+        elif cid.startswith(f"{EXIT_PREFIX}-{today:%Y%m%d}-"):
+            d = 1 if o.side == OrderSide.BUY else -1
+            held[o.symbol] = held.get(o.symbol, 0.0) + d * float(o.filled_qty or 0)
+    return {k: v for k, v in held.items() if abs(v) >= 1}
+
+
 def flatten(trading: TradingClient, plan: dict, today: pd.Timestamp):
-    """Cancel the bot's remaining orders, then close the positions it opened."""
+    """Cancel this strategy's remaining orders, then close the shares it still holds."""
     for attempt in range(5):
         try:
             for o in our_orders(trading, QueryOrderStatus.OPEN, today):
@@ -224,9 +244,11 @@ def flatten(trading: TradingClient, plan: dict, today: pd.Timestamp):
                         except Exception:
                             pass
             time.sleep(2)
-            open_now = [p.symbol for p in trading.get_all_positions() if p.symbol in plan]
-            for sym in open_now:
-                trading.close_position(sym)
+            open_now = held_by_us(trading, today)
+            for sym, qty in open_now.items():
+                trading.submit_order(MarketOrderRequest(
+                    symbol=sym, qty=abs(qty), side=OrderSide.SELL if qty > 0 else OrderSide.BUY,
+                    time_in_force=TimeInForce.DAY, client_order_id=f"{EXIT_PREFIX}-{today:%Y%m%d}-{sym}-{attempt}"))
             if not open_now:
                 log.info("flat")
                 return
@@ -240,6 +262,9 @@ def day_trades(trading: TradingClient, plan: dict, today: pd.Timestamp) -> pd.Da
     """Each trade's result for one day, worked out from the account's actual fills."""
     fills = []
     for o in day_orders(trading, QueryOrderStatus.CLOSED, today):
+        cid = o.client_order_id or ""
+        if not (cid.startswith(f"{PREFIX}-") or cid.startswith(f"{EXIT_PREFIX}-")):
+            continue  # another strategy's order in the same ticker
         for order in [o] + list(o.legs or []):
             if order.symbol in plan and float(order.filled_qty or 0) > 0:
                 fills.append({"symbol": order.symbol, "time": order.filled_at, "qty": float(order.filled_qty),

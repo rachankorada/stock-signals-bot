@@ -178,9 +178,11 @@ class Engine:
             return None
 
         direction = int(d[pick])
-        for open_sig in db.open_signals(sym):
-            if open_sig["timeframe"] == tf or open_sig["direction"] != direction:
-                return None  # one open signal per ticker and timeframe, never opposing
+        open_now = db.open_signals(sym)
+        if any(s["direction"] != direction for s in open_now):
+            return None  # never opposing signals on one ticker
+        if sum(s["timeframe"] == tf for s in open_now) >= config.MAX_STACKED_SIGNALS:
+            return None  # one open signal per ticker and timeframe (more when stacking is allowed)
 
         strategy = ds["strategy"].iloc[pick]
         agreeing = [LABELS[s] for s, dd in zip(ds["strategy"], d) if dd == direction and s != strategy]

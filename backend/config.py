@@ -33,6 +33,12 @@ TRAIN_TICKERS = [
     "F",                                                                       # low priced
 ]
 CONTEXT_TICKERS = ["SPY", "QQQ"]
+# The paper bot watches the training tickers plus 75 more liquid, easy-to-short names
+BOT_TICKERS = TRAIN_TICKERS + """
+    INTC QCOM AVGO MU ORCL CRM ADBE CSCO IBM UBER SHOP PYPL ABNB SNOW PANW CRWD MRVL SMCI ARM DELL
+    C WFC MS SCHW V MA AXP BLK CVX COP OXY SLB HAL JNJ MRK ABBV BMY AMGN GILD CVS MRNA
+    KO PEP PG MCD SBUX NKE TGT HD LOW CMG GE HON UPS DE LMT RTX UNP T VZ CMCSA TMUS
+    RIVN NIO HOOD MARA RIOT SNAP RBLX DKNG AAL DAL UAL CCL GM""".split()
 HISTORY_YEARS = 5   # two years to learn from, then a three-year out-of-sample backtest
 BACKTEST_YEARS = 3
 
@@ -65,3 +71,6 @@ PAPER_TRADE = os.environ.get("PAPER_TRADE", "false").lower() == "true"
 PAPER_RISK_DOLLARS = float(os.environ.get("PAPER_RISK_DOLLARS", "50"))
 # Send signals from setups that failed validation, flagged as unvalidated
 ALLOW_UNVALIDATED = os.environ.get("ALLOW_UNVALIDATED", "false").lower() == "true"
+# Allow up to this many open signals per ticker and timeframe (same direction only). The site uses 1;
+# the paper bot sets more so it trades more often.
+MAX_STACKED_SIGNALS = int(os.environ.get("MAX_STACKED_SIGNALS", "1"))
