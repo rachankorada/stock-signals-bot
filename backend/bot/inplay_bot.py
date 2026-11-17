@@ -46,8 +46,7 @@ from backend.research.universe import candidates
 DIR = config.DATA_DIR / "bot"
 DIR.mkdir(parents=True, exist_ok=True)
 STOP_FRAC = 0.10            # stop distance as a share of the 14-day average daily range
-RISK_DOLLARS = 50.0         # intended loss if a trade is stopped out
-MAX_POSITION_FRAC = 0.10    # cap on one position's size, as a share of account equity
+from backend.bot.signal_bot import MAX_POSITION_FRAC, RISK_DOLLARS  # noqa: E402  (one setting for both bots)
 MIN_USUAL_OPEN_VOLUME = 300  # IEX shares; below this the relative-volume ratio is noise
 LATEST_START_MIN = 8        # minutes after 09:35 beyond which the day's entries are skipped
 PREFIX = "inplay"

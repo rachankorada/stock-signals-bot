@@ -12,6 +12,7 @@ stop distance, so results can be rebuilt from the account alone.
 Run:  python -m backend.bot.signal_bot report
 """
 import logging
+import os
 import sys
 import time
 from datetime import timedelta
@@ -26,8 +27,9 @@ from backend import config
 from backend.data.alpaca_data import ET
 
 PREFIX = "sig"
-RISK_DOLLARS = 50.0          # intended loss if a trade is stopped out
-MAX_POSITION_FRAC = 0.08     # cap on one trade's size, as a share of account equity
+RISK_DOLLARS = float(os.environ.get("BOT_RISK_DOLLARS", "1000"))  # intended loss if a trade is stopped out
+# Cap on one trade's size, as a share of account equity. Very tight stops would otherwise ask for huge positions.
+MAX_POSITION_FRAC = float(os.environ.get("BOT_MAX_POSITION_FRAC", "0.5"))
 FIRST_DAY = "2026-11-17"
 OPEN = ("new", "accepted", "held", "partially_filled", "pending_new", "accepted_for_bidding")
 
