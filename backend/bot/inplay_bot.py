@@ -46,7 +46,10 @@ from backend.research.universe import candidates
 DIR = config.DATA_DIR / "bot"
 DIR.mkdir(parents=True, exist_ok=True)
 STOP_FRAC = 0.10            # stop distance as a share of the 14-day average daily range
-from backend.bot.signal_bot import MAX_POSITION_FRAC, RISK_DOLLARS  # noqa: E402  (one setting for both bots)
+from backend.bot.signal_bot import RISK_DOLLARS  # noqa: E402  (one risk setting for both bots)
+# 20 entry orders sit in the account at once and Alpaca sets buying power aside for each, so these stay
+# small (20 x 5% = the whole account) and leave the other half of buying power to the signal follower
+MAX_POSITION_FRAC = 0.05
 MIN_USUAL_OPEN_VOLUME = 300  # IEX shares; below this the relative-volume ratio is noise
 LATEST_START_MIN = 8        # minutes after 09:35 beyond which the day's entries are skipped
 PREFIX = "inplay"
