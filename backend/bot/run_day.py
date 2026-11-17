@@ -134,7 +134,13 @@ def report():
     print()
     print("=" * 30, "SIGNAL FOLLOWER", "=" * 30)
     guarded("signal report", signal_bot.report, None, False)
-    print(f"\nAccount equity: ${signal_bot.trading_client().get_account().equity}")
+    trading = signal_bot.trading_client()
+    positions = trading.get_all_positions()
+    print("\nOpen right now:" if positions else "\nOpen right now: nothing")
+    for p in positions:
+        print(f"  {p.symbol:6s} {'LONG ' if float(p.qty) > 0 else 'SHORT'} {abs(float(p.qty)):>6.0f} shares  "
+              f"entry {float(p.avg_entry_price):.2f}  now {float(p.current_price):.2f}  P&L ${float(p.unrealized_pl):+,.2f}")
+    print(f"Account equity: ${float(trading.get_account().equity):,.2f}")
 
 
 if __name__ == "__main__":
