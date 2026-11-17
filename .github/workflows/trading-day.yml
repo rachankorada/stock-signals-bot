@@ -1,19 +1,21 @@
-# Both paper-trading bots for one trading day (Alpaca PAPER account).
-# Times are UTC; this week New York is UTC-5.
-#   13:55 UTC = 08:55 ET  start. The morning job trades until 12:30 ET, then the afternoon job takes over
-#                         until just after the close. (One job cannot run longer than six hours.)
+# Both paper-trading bots, every weekday (Alpaca PAPER account). The bot checks Alpaca's calendar and
+# does nothing on market holidays.
+# Times are UTC. 12:55 UTC is 07:55 ET in winter and 08:55 ET in summer; either way the bot builds its
+# baseline and then waits for the open. The morning job trades until 12:30 ET, then the afternoon job
+# takes over until just after the close. (One job cannot run longer than six hours.)
 # A late start is safe: the bot simply begins from wherever the day is, and never places a day's
 # stocks-in-play orders twice.
 name: trading-day
 
 on:
   schedule:
-    - cron: "55 13 18-20 11 *"
+    - cron: "55 12 * * 1-5"
     # Backups: GitHub sometimes skips a scheduled start. A backup that fires while the day's run is
     # going waits in the queue until that run ends after the close, then finds the market shut and exits.
-    - cron: "12 14 18-20 11 *"
-    - cron: "33 14 18-20 11 *"
-    - cron: "7 15 18-20 11 *"
+    - cron: "17 13 * * 1-5"
+    - cron: "41 13 * * 1-5"
+    - cron: "7 14 * * 1-5"
+    - cron: "33 14 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:
