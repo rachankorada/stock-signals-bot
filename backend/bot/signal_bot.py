@@ -27,11 +27,11 @@ from backend import config
 from backend.data.alpaca_data import ET
 
 PREFIX = "sig"
-# Intended loss if a trade is stopped out, as a share of account equity (2% = $2,000 on a $100,000 account)
-RISK_FRAC = float(os.environ.get("BOT_RISK_FRAC", "0.02"))
+# Intended loss if a trade is stopped out, as a share of account equity (1% = $100 on a $10,000 account)
+RISK_FRAC = float(os.environ.get("BOT_RISK_FRAC", "0.01"))
 # Cap on one trade's size, as a share of account equity. Very tight stops would otherwise ask for huge
-# positions. At 20%, about five trades can be open together alongside the stocks-in-play orders.
-MAX_POSITION_FRAC = float(os.environ.get("BOT_MAX_POSITION_FRAC", "0.20"))
+# positions. At 10%, about ten trades can be open together alongside the stocks-in-play orders.
+MAX_POSITION_FRAC = float(os.environ.get("BOT_MAX_POSITION_FRAC", "0.10"))
 FIRST_DAY = "2026-11-17"
 OPEN = ("new", "accepted", "held", "partially_filled", "pending_new", "accepted_for_bidding")
 
