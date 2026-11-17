@@ -1,4 +1,4 @@
 @echo off
-rem Starts the stocks-in-play paper-trading bot for one trading day.
+rem Runs both paper-trading bots for the rest of today's session on this PC.
 cd /d "%~dp0"
-"C:\Users\korad\StockAnalyzerData\venv\Scripts\python.exe" -m backend.bot.inplay_bot >> "C:\Users\korad\StockAnalyzerData\bot\console.log" 2>&1
+"C:\Users\korad\StockAnalyzerData\venv\Scripts\python.exe" -m backend.bot.run_day >> "C:\Users\korad\StockAnalyzerData\bot\console.log" 2>&1

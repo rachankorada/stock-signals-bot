@@ -8,7 +8,12 @@ name: trading-day
 
 on:
   schedule:
-    - cron: "55 13 17-20 11 *"
+    - cron: "55 13 18-20 11 *"
+    # Backups: GitHub sometimes skips a scheduled start. A backup that fires while the day's run is
+    # going waits in the queue until that run ends after the close, then finds the market shut and exits.
+    - cron: "12 14 18-20 11 *"
+    - cron: "33 14 18-20 11 *"
+    - cron: "7 15 18-20 11 *"
   workflow_dispatch:
     inputs:
       mode:
