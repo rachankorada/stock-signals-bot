@@ -46,7 +46,7 @@ from backend.research.universe import candidates
 DIR = config.DATA_DIR / "bot"
 DIR.mkdir(parents=True, exist_ok=True)
 STOP_FRAC = 0.10            # stop distance as a share of the 14-day average daily range
-from backend.bot.signal_bot import RISK_DOLLARS  # noqa: E402  (one risk setting for both bots)
+from backend.bot.signal_bot import shares  # noqa: E402  (one sizing rule for both bots)
 TOP_N = 40                  # candidates traded per day (the backtest used 20)
 # 40 entry orders sit in the account at once and Alpaca sets buying power aside for each, so these stay
 # small (40 x 2.5% = the account's equity) and leave the other half of buying power to the signal follower
@@ -153,7 +153,7 @@ def place_orders(trading: TradingClient, picks: pd.DataFrame, today: pd.Timestam
         d = 1 if p["close"] > p["open"] else -1
         level = float(p["high"] if d > 0 else p["low"])
         risk = max(STOP_FRAC * float(p["atr"]), 0.02)
-        qty = int(min(RISK_DOLLARS / risk, MAX_POSITION_FRAC * equity / level))
+        qty = shares(risk, level, equity, MAX_POSITION_FRAC, one_share_up_to=0.05)
         row = {"direction": d, "level": round(level, 2), "risk": round(risk, 4), "qty": qty, "atr": round(float(p["atr"]), 4),
                "rel_volume": round(float(p["rel_volume"]), 2), "open_volume_iex": float(p["volume"]), "status": "skipped"}
         plan[sym] = row

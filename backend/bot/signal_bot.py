@@ -27,7 +27,8 @@ from backend import config
 from backend.data.alpaca_data import ET
 
 PREFIX = "sig"
-RISK_DOLLARS = float(os.environ.get("BOT_RISK_DOLLARS", "1000"))  # intended loss if a trade is stopped out
+# Intended loss if a trade is stopped out, as a share of account equity (1% = $100 on a $10,000 account)
+RISK_FRAC = float(os.environ.get("BOT_RISK_FRAC", "0.01"))
 # Cap on one trade's size, as a share of account equity. Very tight stops would otherwise ask for huge
 # positions. At 10%, about ten trades can be open together alongside the stocks-in-play orders.
 MAX_POSITION_FRAC = float(os.environ.get("BOT_MAX_POSITION_FRAC", "0.10"))
@@ -63,10 +64,18 @@ def day_orders(trading: TradingClient, today: pd.Timestamp, status=QueryOrderSta
         cursor = pd.Timestamp(page[-1].submitted_at)
 
 
+def shares(risk_per_share: float, price: float, equity: float, cap_frac: float, one_share_up_to: float) -> int:
+    """Shares to trade: the planned risk divided by the stop distance, held to the position cap. When that
+    rounds to zero (an expensive stock on a small account), one share is traded if it costs no more than
+    `one_share_up_to` of equity."""
+    qty = int(min(RISK_FRAC * equity / risk_per_share, cap_frac * equity / price))
+    return 1 if qty < 1 and price <= one_share_up_to * equity else qty
+
+
 def place(trading: TradingClient, sig: dict, equity: float):
     """Enter a new signal at market with its stop and first target attached."""
     sym, d = sig["symbol"], sig["direction"]
-    qty = int(min(RISK_DOLLARS / sig["risk"], MAX_POSITION_FRAC * equity / sig["entry"]))
+    qty = shares(sig["risk"], sig["entry"], equity, MAX_POSITION_FRAC, one_share_up_to=0.25)
     if qty < 1:
         log.info("signal %s %s: size rounds to zero, skipped", sig["id"], sym)
         return
