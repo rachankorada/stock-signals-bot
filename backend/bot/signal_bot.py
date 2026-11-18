@@ -160,12 +160,21 @@ def close_out(trading: TradingClient, parent):
         time.sleep(0.5)
     # A stop or target can fill only part of the way, so exit exactly what is still held
     remaining = float(fresh.filled_qty) - sum(float(leg.filled_qty or 0) for leg in (fresh.legs or []))
+    exit_id = parent.client_order_id.replace(PREFIX + "-", PREFIX + "x-", 1)
+    try:   # an exit already sent for this trade (ids must be unique, and its shares are already out)
+        sent = trading.get_order_by_client_id(exit_id)
+    except Exception:
+        sent = None
+    if sent is not None:
+        if sent.status.value in OPEN:
+            return
+        remaining -= float(sent.filled_qty or 0)
+        exit_id += "b"
     if remaining < 1:
         return
     trading.submit_order(MarketOrderRequest(
         symbol=parent.symbol, qty=remaining, time_in_force=TimeInForce.DAY,
-        side=OrderSide.SELL if parent.side == OrderSide.BUY else OrderSide.BUY,
-        client_order_id=parent.client_order_id.replace(PREFIX + "-", PREFIX + "x-", 1)))
+        side=OrderSide.SELL if parent.side == OrderSide.BUY else OrderSide.BUY, client_order_id=exit_id))
 
 
 def finish(trading: TradingClient, sig: dict):

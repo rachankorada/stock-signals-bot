@@ -72,6 +72,9 @@ def run(until: str = None):
     halted = False
     log.info("paper account equity $%.2f; session %s to %s ET", equity, f"{opens:%H:%M}", f"{closes:%H:%M}")
 
+    # Stocks in play never holds overnight: exit anything a failed close-out left behind
+    guarded("stocks-in-play leftovers", inplay_bot.close_leftovers, trading, today)
+
     # Stocks in play: the baseline must be ready before 09:35
     scan_at = opens + timedelta(minutes=5)
     prep = None

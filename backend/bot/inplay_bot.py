@@ -217,7 +217,10 @@ def plan_from_orders(trading: TradingClient, today: pd.Timestamp) -> dict:
 
 
 def cancel_untriggered(trading: TradingClient, today: pd.Timestamp):
-    for o in our_orders(trading, QueryOrderStatus.OPEN, today):
+    # ALL, not OPEN: once an entry has filled it no longer counts as open, though its stop still is
+    for o in our_orders(trading, QueryOrderStatus.ALL, today):
+        if o.status.value not in LIVE_LEG + ("partially_filled",):
+            continue
         if float(o.filled_qty or 0) == 0:
             try:
                 trading.cancel_order_by_id(o.id)
@@ -340,9 +343,11 @@ def flatten(trading: TradingClient, plan: dict, today: pd.Timestamp):
     """Cancel this strategy's remaining orders, then close the shares it still holds."""
     for attempt in range(5):
         try:
-            for o in our_orders(trading, QueryOrderStatus.OPEN, today):
+            # ALL, not OPEN: a filled entry no longer counts as open, but its stop does, and the stop
+            # holds the shares the exit needs (on 2026-11-18 this left 13 trades open overnight)
+            for o in our_orders(trading, QueryOrderStatus.ALL, today):
                 for order in [o] + list(o.legs or []):
-                    if order.status.value in ("new", "accepted", "held", "partially_filled", "pending_new"):
+                    if order.status.value in LIVE_LEG + ("partially_filled",):
                         try:
                             trading.cancel_order_by_id(order.id)
                         except Exception:
@@ -360,6 +365,34 @@ def flatten(trading: TradingClient, plan: dict, today: pd.Timestamp):
         except Exception:
             log.exception("flatten attempt %d failed", attempt + 1)
             time.sleep(5)
+
+
+def close_leftovers(trading: TradingClient, today: pd.Timestamp, days_back: int = 7):
+    """Exit shares this strategy still holds from an earlier day (it never means to hold overnight).
+    Run before the open, the market orders execute at the open. The exits carry the earlier day's
+    date so that day's results add up."""
+    first = max(pd.Timestamp(FIRST_DAY), today - pd.Timedelta(days=days_back))
+    cal = trading.get_calendar(GetCalendarRequest(start=first.date(), end=(today - pd.Timedelta(days=1)).date()))
+    positions = {p.symbol: float(p.qty) for p in trading.get_all_positions()}
+    waiting = {o.symbol for o in trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500))
+               if (o.client_order_id or "").startswith(EXIT_PREFIX + "-")}   # an exit is already queued
+    for day in [pd.Timestamp(c.date) for c in cal]:
+        for sym, qty in held_by_us(trading, day).items():
+            if sym in waiting:
+                continue
+            have = positions.get(sym, 0.0)
+            qty = qty if qty * have > 0 else 0.0
+            qty = (min(qty, have) if qty > 0 else max(qty, have))   # never more than the account holds
+            if abs(qty) < 1:
+                continue
+            try:
+                trading.submit_order(MarketOrderRequest(
+                    symbol=sym, qty=abs(qty), side=OrderSide.SELL if qty > 0 else OrderSide.BUY, time_in_force=TimeInForce.DAY,
+                    client_order_id=f"{EXIT_PREFIX}-{day:%Y%m%d}-{sym}-late"))
+                positions[sym] = have - qty
+                log.warning("%s: %.0f shares left over from %s, exit at market sent", sym, qty, f"{day:%Y-%m-%d}")
+            except Exception as exc:
+                log.warning("%s: could not exit the shares left over from %s: %s", sym, f"{day:%Y-%m-%d}", str(exc)[:200])
 
 
 def day_trades(trading: TradingClient, plan: dict, today: pd.Timestamp) -> pd.DataFrame:
