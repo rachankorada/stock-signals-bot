@@ -37,8 +37,10 @@ TRAIN_TICKERS = [
 CONTEXT_TICKERS = ["SPY", "QQQ"]
 # The paper bot trades only tickers the models were trained and backtested on
 BOT_TICKERS = list(TRAIN_TICKERS)
-# Timeframes the paper bot follows (1-minute signals: worst in the backtest and live, entries too slow to match)
-BOT_TIMEFRAMES = [3, 5, 15]
+# Timeframes the paper bot follows. Every timeframe loses in the backtest (IEX-trained, 30 tickers, after
+# costs: 3m -0.14R, 5m -0.11R, 15m -0.05R), so the bot keeps only the least negative, as a live test of the
+# site's signals at small cost; its edge is meant to come from stocks in play.
+BOT_TIMEFRAMES = [15]
 HISTORY_YEARS = 5   # two years to learn from, then a three-year out-of-sample backtest
 BACKTEST_YEARS = 3
 
