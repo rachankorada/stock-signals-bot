@@ -32,6 +32,7 @@ from backend.engine.live import LiveRunner
 
 DIR = inplay_bot.DIR
 log = logging.getLogger("day")
+DAILY_LOSS_LIMIT = 0.03   # no new signal trades once equity is this far below the previous close
 
 
 def now() -> pd.Timestamp:
@@ -65,7 +66,10 @@ def run(until: str = None):
     if now() >= closes:
         log.info("market already closed")
         return
-    equity = float(trading.get_account().equity)
+    account = trading.get_account()
+    equity = float(account.equity)
+    floor = float(account.last_equity) * (1 - DAILY_LOSS_LIMIT)   # last_equity: equity at the previous close
+    halted = False
     log.info("paper account equity $%.2f; session %s to %s ET", equity, f"{opens:%H:%M}", f"{closes:%H:%M}")
 
     # Stocks in play: the baseline must be ready before 09:35
@@ -103,7 +107,15 @@ def run(until: str = None):
         # Every minute: update the signal engine and act on what it says
         try:
             live.refresh(config.CONTEXT_TICKERS + symbols, boundary)
+            if not halted:
+                now_equity = guarded("equity check", lambda: float(trading.get_account().equity))
+                if now_equity is not None and now_equity <= floor:
+                    halted = True
+                    log.warning("equity $%.2f is %.0f%% below the previous close: no new signal trades today "
+                                "(open ones keep their stops and targets)", now_equity, DAILY_LOSS_LIMIT * 100)
             for event in engine.on_minute(boundary, symbols):
+                if halted and event["type"] == "signal":
+                    continue
                 guarded("signal order", signal_bot.handle, trading, event, equity)
         except Exception:
             log.exception("signal engine error at %s", f"{boundary:%H:%M}")

@@ -92,6 +92,8 @@ def train_timeframe(tf: int, save: bool = True) -> dict:
             ds.to_parquet(cache / name)
 
     oos = walk_forward(ds)
+    if save:   # every backtest trade with its out-of-sample confidence, for later checks of filters
+        oos.to_parquet(cache / name.replace("tf", "oos_tf", 1))
     days = oos["time"].dt.normalize().nunique()
     print(f"setups: {len(ds):,} from {ds['time'].min():%Y-%m-%d}; backtest window {oos['time'].min():%Y-%m-%d} "
           f"to {oos['time'].max():%Y-%m-%d} ({days} trading days, {len(oos):,} setups)")
