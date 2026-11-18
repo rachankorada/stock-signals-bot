@@ -2,8 +2,8 @@
 
 Each trading day:
   before the open  build the baseline for every stock (daily range, usual opening volume)
-  09:35 ET         rank stocks by opening volume against their own recent opens, keep the top 20,
-                   and place a breakout entry order with an attached stop for each
+  09:35 ET         rank stocks by opening volume against their own recent opens, keep the top 40,
+                   and place a breakout entry order with an attached stop and take-profit for each
   15:30 ET         cancel entries that never triggered
   15:55 ET         close every position the bot opened
   after the close  write the day's results
@@ -37,7 +37,7 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (GetCalendarRequest, GetOrdersRequest, MarketOrderRequest, ReplaceOrderRequest,
-                                     StopLossRequest, StopOrderRequest)
+                                     StopLossRequest, StopOrderRequest, TakeProfitRequest)
 
 from backend import config
 from backend.data.alpaca_data import ET, client
@@ -47,6 +47,7 @@ from backend.research.universe import candidates
 DIR = config.DATA_DIR / "bot"
 DIR.mkdir(parents=True, exist_ok=True)
 STOP_FRAC = 0.10            # stop distance as a share of the 14-day average daily range
+TAKE_PROFIT_R = 3           # take-profit, in stop distances from the fill (tick replay: steadier than holding to the close)
 from backend.bot.signal_bot import shares  # noqa: E402  (one sizing rule for both bots)
 TOP_N = 40                  # candidates traded per day (the backtest used 20)
 # 40 entry orders sit in the account at once and Alpaca sets buying power aside for each, so these stay
@@ -162,8 +163,9 @@ def place_orders(trading: TradingClient, picks: pd.DataFrame, today: pd.Timestam
             continue
         side = OrderSide.BUY if d > 0 else OrderSide.SELL
         entry = round(level + 0.01 * d, 2)
-        common = dict(symbol=sym, qty=qty, side=side, time_in_force=TimeInForce.DAY, order_class=OrderClass.OTO,
-                      stop_loss=StopLossRequest(stop_price=round(entry - d * risk, 2)))
+        common = dict(symbol=sym, qty=qty, side=side, time_in_force=TimeInForce.DAY, order_class=OrderClass.BRACKET,
+                      stop_loss=StopLossRequest(stop_price=round(entry - d * risk, 2)),
+                      take_profit=TakeProfitRequest(limit_price=round(entry + d * TAKE_PROFIT_R * risk, 2)))
         # The id carries the stop distance (in hundredths of a cent) so the plan can be rebuilt from the account
         order_id = f"{PREFIX}-{today:%Y%m%d}-{sym}-{int(round(risk * 10000))}"
         try:
@@ -224,11 +226,11 @@ def latest_price(sym: str) -> float:
 
 
 def move_stops(trading: TradingClient, today: pd.Timestamp):
-    """Once an entry has filled, put its stop exactly one stop distance from the fill price, as in the
-    backtest. The stop is first placed from the breakout level, so a fill beyond the level (a market
-    entry, or slippage on the stop entry) would otherwise start the trade with more than 1R at risk.
-    Stops are only ever tightened. If the price is already past the new stop, the trade is closed
-    at market, which is what the backtest does."""
+    """Once an entry has filled, put its stop exactly one stop distance from the fill price and its
+    take-profit TAKE_PROFIT_R stop distances from it, as in the backtest. Both are first placed from the
+    breakout level, so a fill beyond the level (a market entry, or slippage on the stop entry) would
+    otherwise start the trade with more than 1R at risk. Stops are only ever tightened. If the price
+    is already past the new stop, the trade is closed at market, which is what the backtest does."""
     for o in our_orders(trading, QueryOrderStatus.ALL, today):
         filled = float(o.filled_qty or 0)
         if filled < 1 or not o.filled_avg_price:
@@ -236,6 +238,14 @@ def move_stops(trading: TradingClient, today: pd.Timestamp):
         d = 1 if o.side == OrderSide.BUY else -1
         risk = int(o.client_order_id.split("-")[3].rstrip("m")) / 10000
         target = round(float(o.filled_avg_price) - d * risk, 2)
+        profit = round(float(o.filled_avg_price) + d * TAKE_PROFIT_R * risk, 2)
+        for leg in o.legs or []:
+            if leg.status.value in LIVE_LEG and leg.limit_price is not None and abs(float(leg.limit_price) - profit) >= 0.005:
+                try:
+                    trading.replace_order_by_id(leg.id, ReplaceOrderRequest(limit_price=profit))
+                    log.info("%s take-profit moved %.2f -> %.2f", o.symbol, float(leg.limit_price), profit)
+                except Exception as exc:
+                    log.warning("%s take-profit not moved, will retry: %s", o.symbol, exc)
         for leg in o.legs or []:
             if leg.status.value not in LIVE_LEG or leg.stop_price is None:
                 continue
@@ -256,8 +266,13 @@ def move_stops(trading: TradingClient, today: pd.Timestamp):
                 log.warning("%s stop not moved, will retry: %s", o.symbol, problem)
                 continue
             # Already through the 1R stop: close the remaining shares now
-            left = filled - float(leg.filled_qty or 0)
-            trading.cancel_order_by_id(leg.id)
+            left = filled - sum(float(x.filled_qty or 0) for x in o.legs)
+            for x in o.legs:   # both legs: a live take-profit would hold the shares the exit needs
+                if x.status.value in LIVE_LEG:
+                    try:
+                        trading.cancel_order_by_id(x.id)
+                    except Exception:
+                        pass
             for attempt in range(5):
                 time.sleep(1)
                 try:
