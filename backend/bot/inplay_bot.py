@@ -50,8 +50,9 @@ DIR.mkdir(parents=True, exist_ok=True)
 STOP_FRAC = 0.10            # stop distance as a share of the 14-day average daily range
 # Exit: the stop or the close. A fixed take-profit and a trailing stop both looked better at first, but
 # only because of an error in judging trades stopped inside their entry minute; measured properly, a 3R
-# target did worse than holding (development -0.23R, final six months -0.09R). The trailing stop below
-# is off (None) until it is measured properly.
+# target did worse than holding (development -0.23R, final six months -0.09R). Re-measured with real
+# entry-minute stop-outs (1,148 development trades, 2 bps): holding +0.28R; targets of 2/3/5R -0.03/+0.01/
+# +0.05R; trailing stops (from 1.5-5R, 1-2R behind) +0.04 to +0.10R. So the trailing stop below stays off.
 TRAIL_FROM_R = None         # once a trade is this many stop distances in profit, the stop starts trailing
 TRAIL_R = 1.0               # ... this many stop distances behind the best price since the entry minute
 # Entry filters (hold to the close, tick replay, 2 bps; development / final six months):
