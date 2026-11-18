@@ -4,7 +4,7 @@ Each trading day:
   before the open  build the baseline for every stock (daily range, usual opening volume)
   09:35 ET         rank stocks by opening volume against their own recent opens, keep the top 10,
                    and place a breakout entry order with an attached stop for each;
-                   cancel entries not triggered by 09:50; trail the stop once a trade is 2R up
+                   (opening volume 5x the usual or more); cancel entries not triggered by 09:50
   15:30 ET         cancel entries that never triggered
   15:55 ET         close every position the bot opened
   after the close  write the day's results
@@ -48,13 +48,16 @@ from backend.research.universe import candidates
 DIR = config.DATA_DIR / "bot"
 DIR.mkdir(parents=True, exist_ok=True)
 STOP_FRAC = 0.10            # stop distance as a share of the 14-day average daily range
-TRAIL_FROM_R = 2.0          # once a trade is this many stop distances in profit, the stop starts trailing
+# Exit: the stop or the close. A fixed take-profit and a trailing stop both looked better at first, but
+# only because of an error in judging trades stopped inside their entry minute; measured properly, a 3R
+# target did worse than holding (development -0.23R, final six months -0.09R). The trailing stop below
+# is off (None) until it is measured properly.
+TRAIL_FROM_R = None         # once a trade is this many stop distances in profit, the stop starts trailing
 TRAIL_R = 1.0               # ... this many stop distances behind the best price since the entry minute
-# (tick replay, top 10: +0.26R after 2 bps against +0.22R for a fixed 3R target and +0.22R for none,
-#  better in every year; replaces the fixed take-profit)
-MIN_REL_VOLUME = 5.0        # opening volume at least this many times the usual (below 5x: +0.05R, above: +0.25R)
-ENTRY_WINDOW_MIN = 15       # entries not triggered within this many minutes of 09:35 are cancelled
-                            # (breakouts in the first 15 minutes: +0.26R; later ones: +0.09R)
+# Entry filters (hold to the close, tick replay, 2 bps; development / final six months):
+MIN_REL_VOLUME = 5.0        # opening volume at least 5x the usual: +0.25 / +0.17R; below: +0.12 / -0.33R
+ENTRY_WINDOW_MIN = 15       # entries not triggered by 09:50 are cancelled: first 15 min +0.23 / +0.23R;
+                            # later breakouts +0.20 / -0.28R
 from backend.bot.signal_bot import shares  # noqa: E402  (one sizing rule for both bots)
 TOP_N = 10                  # candidates traded per day (tick replay: ranks 1-10 carry the edge, 11-20 about nothing)
 # 10 entry orders sit in the account at once and Alpaca sets buying power aside for each
@@ -258,7 +261,7 @@ def move_stops(trading: TradingClient, today: pd.Timestamp):
         return
     since = min(pd.Timestamp(o.filled_at) for o in filled_orders).tz_convert(ET).floor("min") + pd.Timedelta(minutes=1)
     try:
-        bars = minute_bars(sorted({o.symbol for o in filled_orders}), since)
+        bars = minute_bars(sorted({o.symbol for o in filled_orders}), since) if TRAIL_FROM_R is not None else {}
     except Exception:
         log.exception("could not fetch bars for the trailing stops; only the 1R stops are checked this minute")
         bars = {}
