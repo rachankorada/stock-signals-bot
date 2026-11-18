@@ -3,7 +3,8 @@
 Each trading day:
   before the open  build the baseline for every stock (daily range, usual opening volume)
   09:35 ET         rank stocks by opening volume against their own recent opens, keep the top 10,
-                   and place a breakout entry order with an attached stop and take-profit for each
+                   and place a breakout entry order with an attached stop for each;
+                   cancel entries not triggered by 09:50; trail the stop once a trade is 2R up
   15:30 ET         cancel entries that never triggered
   15:55 ET         close every position the bot opened
   after the close  write the day's results
@@ -37,7 +38,7 @@ from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import (GetCalendarRequest, GetOrdersRequest, MarketOrderRequest, ReplaceOrderRequest,
-                                     StopLossRequest, StopOrderRequest, TakeProfitRequest)
+                                     StopLossRequest, StopOrderRequest)
 
 from backend import config
 from backend.data.alpaca_data import ET, client
@@ -47,7 +48,13 @@ from backend.research.universe import candidates
 DIR = config.DATA_DIR / "bot"
 DIR.mkdir(parents=True, exist_ok=True)
 STOP_FRAC = 0.10            # stop distance as a share of the 14-day average daily range
-TAKE_PROFIT_R = 3           # take-profit, in stop distances from the fill (tick replay: steadier than holding to the close)
+TRAIL_FROM_R = 2.0          # once a trade is this many stop distances in profit, the stop starts trailing
+TRAIL_R = 1.0               # ... this many stop distances behind the best price since the entry minute
+# (tick replay, top 10: +0.26R after 2 bps against +0.22R for a fixed 3R target and +0.22R for none,
+#  better in every year; replaces the fixed take-profit)
+MIN_REL_VOLUME = 5.0        # opening volume at least this many times the usual (below 5x: +0.05R, above: +0.25R)
+ENTRY_WINDOW_MIN = 15       # entries not triggered within this many minutes of 09:35 are cancelled
+                            # (breakouts in the first 15 minutes: +0.26R; later ones: +0.09R)
 from backend.bot.signal_bot import shares  # noqa: E402  (one sizing rule for both bots)
 TOP_N = 10                  # candidates traded per day (tick replay: ranks 1-10 carry the edge, 11-20 about nothing)
 # 10 entry orders sit in the account at once and Alpaca sets buying power aside for each
@@ -142,7 +149,7 @@ def pick(prep: pd.DataFrame, today: pd.Timestamp) -> pd.DataFrame:
     df = prep.join(bars[["open", "high", "low", "close", "volume"]], how="inner")
     df["rel_volume"] = df["volume"] / df["usual_open_volume"]
     df = df[(df["open"] >= MIN_PRICE) & (df["avg_volume"] >= MIN_AVG_VOLUME) & (df["atr"] >= MIN_ATR)
-            & (df["usual_open_volume"] >= MIN_USUAL_OPEN_VOLUME) & (df["rel_volume"] >= 1.0) & (df["close"] != df["open"])]
+            & (df["usual_open_volume"] >= MIN_USUAL_OPEN_VOLUME) & (df["rel_volume"] >= MIN_REL_VOLUME) & (df["close"] != df["open"])]
     return df.sort_values("rel_volume", ascending=False).head(TOP_N)
 
 
@@ -163,9 +170,8 @@ def place_orders(trading: TradingClient, picks: pd.DataFrame, today: pd.Timestam
             continue
         side = OrderSide.BUY if d > 0 else OrderSide.SELL
         entry = round(level + 0.01 * d, 2)
-        common = dict(symbol=sym, qty=qty, side=side, time_in_force=TimeInForce.DAY, order_class=OrderClass.BRACKET,
-                      stop_loss=StopLossRequest(stop_price=round(entry - d * risk, 2)),
-                      take_profit=TakeProfitRequest(limit_price=round(entry + d * TAKE_PROFIT_R * risk, 2)))
+        common = dict(symbol=sym, qty=qty, side=side, time_in_force=TimeInForce.DAY, order_class=OrderClass.OTO,
+                      stop_loss=StopLossRequest(stop_price=round(entry - d * risk, 2)))
         # The id carries the stop distance (in hundredths of a cent) so the plan can be rebuilt from the account
         order_id = f"{PREFIX}-{today:%Y%m%d}-{sym}-{int(round(risk * 10000))}"
         try:
@@ -225,27 +231,52 @@ def latest_price(sym: str) -> float:
     return float(client().get_stock_latest_trade(StockLatestTradeRequest(symbol_or_symbols=sym, feed=DataFeed.IEX))[sym].price)
 
 
+def minute_bars(symbols: list, since: pd.Timestamp) -> dict:
+    """Each symbol's completed IEX minute bars from `since` on, keyed by symbol."""
+    end = pd.Timestamp.now(tz=ET).floor("min")
+    if not symbols or since >= end:
+        return {}
+    df = fetch(symbols, since, end - timedelta(seconds=1), TimeFrame.Minute, DataFeed.IEX)
+    if df.empty:
+        return {}
+    df = df[df["timestamp"] < end]
+    return {sym: g for sym, g in df.groupby("symbol")}
+
+
 def move_stops(trading: TradingClient, today: pd.Timestamp):
-    """Once an entry has filled, put its stop exactly one stop distance from the fill price and its
-    take-profit TAKE_PROFIT_R stop distances from it, as in the backtest. Both are first placed from the
-    breakout level, so a fill beyond the level (a market entry, or slippage on the stop entry) would
-    otherwise start the trade with more than 1R at risk. Stops are only ever tightened. If the price
-    is already past the new stop, the trade is closed at market, which is what the backtest does."""
-    for o in our_orders(trading, QueryOrderStatus.ALL, today):
-        filled = float(o.filled_qty or 0)
-        if filled < 1 or not o.filled_avg_price:
-            continue
+    """Manage each filled trade's stop, every minute, as in the backtest:
+      - one stop distance (1R) from the actual fill price; the stop is first placed from the breakout
+        level, so a fill beyond the level would otherwise start the trade with more than 1R at risk
+      - once the best price since the entry minute is TRAIL_FROM_R or more in profit, the stop
+        follows TRAIL_R behind that best price (no fixed take-profit)
+    Stops are only ever tightened. If the price is already past the new stop, the trade is closed at
+    market, which is what the backtest does."""
+    filled_orders = [o for o in our_orders(trading, QueryOrderStatus.ALL, today)
+                     if float(o.filled_qty or 0) >= 1 and o.filled_avg_price and o.filled_at
+                     and any(leg.status.value in LIVE_LEG for leg in o.legs or [])]
+    if not filled_orders:
+        return
+    since = min(pd.Timestamp(o.filled_at) for o in filled_orders).tz_convert(ET).floor("min") + pd.Timedelta(minutes=1)
+    try:
+        bars = minute_bars(sorted({o.symbol for o in filled_orders}), since)
+    except Exception:
+        log.exception("could not fetch bars for the trailing stops; only the 1R stops are checked this minute")
+        bars = {}
+    for o in filled_orders:
+        filled = float(o.filled_qty)
         d = 1 if o.side == OrderSide.BUY else -1
         risk = int(o.client_order_id.split("-")[3].rstrip("m")) / 10000
-        target = round(float(o.filled_avg_price) - d * risk, 2)
-        profit = round(float(o.filled_avg_price) + d * TAKE_PROFIT_R * risk, 2)
-        for leg in o.legs or []:
-            if leg.status.value in LIVE_LEG and leg.limit_price is not None and abs(float(leg.limit_price) - profit) >= 0.005:
-                try:
-                    trading.replace_order_by_id(leg.id, ReplaceOrderRequest(limit_price=profit))
-                    log.info("%s take-profit moved %.2f -> %.2f", o.symbol, float(leg.limit_price), profit)
-                except Exception as exc:
-                    log.warning("%s take-profit not moved, will retry: %s", o.symbol, exc)
+        fill = float(o.filled_avg_price)
+        target = fill - d * risk
+        # Best price from the minute after the fill on (the entry minute does not count, as in the backtest)
+        after = pd.Timestamp(o.filled_at).tz_convert(ET).floor("min") + pd.Timedelta(minutes=1)
+        g = bars.get(o.symbol)
+        g = g[g["timestamp"] >= after] if g is not None else None
+        if g is not None and len(g):
+            peak = float(g["high"].max()) if d > 0 else float(g["low"].min())
+            if d * (peak - fill) / risk >= TRAIL_FROM_R:
+                target = max(target, peak - TRAIL_R * risk) if d > 0 else min(target, peak + TRAIL_R * risk)
+        target = round(target, 2)
         for leg in o.legs or []:
             if leg.status.value not in LIVE_LEG or leg.stop_price is None:
                 continue
@@ -254,7 +285,7 @@ def move_stops(trading: TradingClient, today: pd.Timestamp):
                 continue
             try:
                 trading.replace_order_by_id(leg.id, ReplaceOrderRequest(stop_price=target))
-                log.info("%s stop moved %.2f -> %.2f (1R from the %.2f fill)", o.symbol, old, target, float(o.filled_avg_price))
+                log.info("%s stop moved %.2f -> %.2f (fill %.2f)", o.symbol, old, target, fill)
                 continue
             except Exception as exc:
                 problem = exc
@@ -265,9 +296,9 @@ def move_stops(trading: TradingClient, today: pd.Timestamp):
             if not np.isfinite(price) or d * (price - target) > 0:   # unknown price, or not past the stop yet
                 log.warning("%s stop not moved, will retry: %s", o.symbol, problem)
                 continue
-            # Already through the 1R stop: close the remaining shares now
+            # Already through the stop: close the remaining shares now
             left = filled - sum(float(x.filled_qty or 0) for x in o.legs)
-            for x in o.legs:   # both legs: a live take-profit would hold the shares the exit needs
+            for x in o.legs:
                 if x.status.value in LIVE_LEG:
                     try:
                         trading.cancel_order_by_id(x.id)
@@ -279,7 +310,7 @@ def move_stops(trading: TradingClient, today: pd.Timestamp):
                     trading.submit_order(MarketOrderRequest(
                         symbol=o.symbol, qty=left, side=OrderSide.SELL if d > 0 else OrderSide.BUY,
                         time_in_force=TimeInForce.DAY, client_order_id=f"{EXIT_PREFIX}-{today:%Y%m%d}-{o.symbol}-s{attempt}"))
-                    log.info("%s already past its 1R stop %.2f (last %.2f); closed at market", o.symbol, target, price)
+                    log.info("%s already past its stop %.2f (last %.2f); closed at market", o.symbol, target, price)
                     break
                 except Exception:
                     log.exception("%s market exit attempt %d failed", o.symbol, attempt + 1)

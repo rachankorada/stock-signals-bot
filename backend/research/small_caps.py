@@ -46,7 +46,7 @@ if __name__ == "__main__":
     if "--cached" in sys.argv and cache.exists():
         raw = pd.read_parquet(cache)
     else:
-        raw = build_dataset(tf, symbols)
+        raw = build_dataset(tf, symbols, feed="sip")
         raw.to_parquet(cache)
 
     ds = with_costs(raw, spreads)

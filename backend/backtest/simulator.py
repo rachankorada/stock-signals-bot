@@ -92,20 +92,27 @@ def simulate(f: pd.DataFrame, setups: pd.DataFrame, tf: int) -> pd.DataFrame:
     return out.reset_index(drop=True)
 
 
-def load_context(tf: int) -> dict:
+def load_context(tf: int, feed: str = "sip") -> dict:
     return {
-        name.lower(): context_features(resample(load_bars(name), tf), tf)
+        name.lower(): context_features(resample(load_bars(name, feed), tf), tf)
         for name in config.CONTEXT_TICKERS
     }
 
 
-def build_dataset(tf: int, symbols=None) -> pd.DataFrame:
-    """Every setup with its outcome for all symbols at one timeframe."""
-    ctx = load_context(tf)
+def build_dataset(tf: int, symbols=None, feed: str = None) -> pd.DataFrame:
+    """Every setup with its outcome for all symbols at one timeframe. Setups and model inputs come from
+    `feed` bars; outcomes are always simulated on full-market prices."""
+    feed = feed or config.TRAIN_FEED
+    ctx = load_context(tf, feed)
     parts = []
     for sym in symbols or config.TRAIN_TICKERS:
-        f = compute_features(resample(load_bars(sym), tf), tf, ctx)
-        trades = simulate(f, find_setups(f, tf), tf)
+        f = compute_features(resample(load_bars(sym, feed), tf), tf, ctx)
+        setups = find_setups(f, tf)
+        if feed != "sip":
+            full = resample(load_bars(sym), tf).reindex(f.index)
+            for k in ("open", "high", "low", "close"):
+                f[k] = full[k].fillna(f[k])
+        trades = simulate(f, setups, tf)
         trades.insert(0, "symbol", sym)
         parts.append(trades)
     return pd.concat(parts, ignore_index=True).sort_values("time").reset_index(drop=True)

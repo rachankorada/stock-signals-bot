@@ -43,6 +43,9 @@ HISTORY_YEARS = 5   # two years to learn from, then a three-year out-of-sample b
 BACKTEST_YEARS = 3
 
 TIMEFRAMES = [1, 3, 5, 15]  # minutes
+# Bars the models learn from. The live engine reads IEX bars (the free real-time feed), so training uses
+# IEX bars for the inputs; backtest outcomes are always judged on full-market prices, where fills happen.
+TRAIN_FEED = os.environ.get("TRAIN_FEED", "iex")
 
 # Trade construction
 STOP_MIN_ATR = float(os.environ.get("STOP_MIN_ATR", "1.0"))

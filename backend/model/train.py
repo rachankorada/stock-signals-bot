@@ -82,12 +82,14 @@ def train_timeframe(tf: int, save: bool = True) -> dict:
     print(f"\n===== {tf}-minute timeframe =====", flush=True)
     cache = config.DATA_DIR / "datasets"
     cache.mkdir(exist_ok=True)
-    if "--cached" in sys.argv and (cache / f"tf{tf}.parquet").exists():
-        ds = pd.read_parquet(cache / f"tf{tf}.parquet")  # skip rebuilding setups (strategies unchanged)
+    name = f"tf{tf}.parquet" if config.TRAIN_FEED == "sip" else f"tf{tf}_{config.TRAIN_FEED}.parquet"
+    print(f"inputs from {config.TRAIN_FEED.upper()} bars, {len(config.TRAIN_TICKERS)} tickers", flush=True)
+    if "--cached" in sys.argv and (cache / name).exists():
+        ds = pd.read_parquet(cache / name)  # skip rebuilding setups (strategies unchanged)
     else:
         ds = build_dataset(tf)
         if save:
-            ds.to_parquet(cache / f"tf{tf}.parquet")
+            ds.to_parquet(cache / name)
 
     oos = walk_forward(ds)
     days = oos["time"].dt.normalize().nunique()
