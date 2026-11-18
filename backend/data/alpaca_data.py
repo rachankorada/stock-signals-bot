@@ -53,20 +53,20 @@ def fetch_bars(symbol: str, start: datetime, end: datetime, feed: DataFeed = Dat
     return regular_hours(df).astype("float64")
 
 
-def bars_path(symbol: str):
-    return config.BARS_DIR / f"{symbol}.parquet"
+def bars_path(symbol: str, feed: str = "sip"):
+    return (config.BARS_IEX_DIR if feed == "iex" else config.BARS_DIR) / f"{symbol}.parquet"
 
 
-def load_bars(symbol: str) -> pd.DataFrame:
-    return pd.read_parquet(bars_path(symbol))
+def load_bars(symbol: str, feed: str = "sip") -> pd.DataFrame:
+    return pd.read_parquet(bars_path(symbol, feed))
 
 
-def download_history(symbol: str, years: int = config.HISTORY_YEARS) -> pd.DataFrame:
-    """Download (or top up) full-market 1-minute history for one symbol."""
+def download_history(symbol: str, years: int = config.HISTORY_YEARS, feed: str = "sip") -> pd.DataFrame:
+    """Download (or top up) 1-minute history for one symbol: full market ("sip") or IEX only ("iex")."""
     # The free plan cannot query the most recent 15 minutes of SIP data
     end = datetime.now(timezone.utc) - timedelta(minutes=20)
-    path = bars_path(symbol)
-    old = load_bars(symbol) if path.exists() else None
+    path = bars_path(symbol, feed)
+    old = load_bars(symbol, feed) if path.exists() else None
     start = end - timedelta(days=365 * years)
     spans = [(start, end)]
     if old is not None and len(old):
@@ -78,7 +78,7 @@ def download_history(symbol: str, years: int = config.HISTORY_YEARS) -> pd.DataF
     for cursor, span_end in spans:
         while cursor < span_end:  # quarter-sized chunks keep each request manageable
             chunk_end = min(cursor + timedelta(days=90), span_end)
-            parts.append(fetch_bars(symbol, cursor, chunk_end))
+            parts.append(fetch_bars(symbol, cursor, chunk_end, DataFeed.IEX if feed == "iex" else DataFeed.SIP))
             cursor = chunk_end
     df = pd.concat([p for p in parts if len(p)])
     df = df[~df.index.duplicated(keep="last")].sort_index()
@@ -89,8 +89,9 @@ def download_history(symbol: str, years: int = config.HISTORY_YEARS) -> pd.DataF
 if __name__ == "__main__":
     import sys
 
-    symbols = sys.argv[1:] or config.CONTEXT_TICKERS + config.TRAIN_TICKERS
+    feed = "iex" if "--iex" in sys.argv else "sip"
+    symbols = [a for a in sys.argv[1:] if not a.startswith("--")] or config.CONTEXT_TICKERS + config.TRAIN_TICKERS
     for sym in symbols:
         t0 = time.time()
-        d = download_history(sym)
+        d = download_history(sym, feed=feed)
         print(f"{sym}: {len(d):,} bars {d.index[0].date()} -> {d.index[-1].date()} ({time.time() - t0:.0f}s)", flush=True)

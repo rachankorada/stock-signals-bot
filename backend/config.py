@@ -11,14 +11,15 @@ ALPACA_API_KEY = os.environ.get("ALPACA_API_KEY", "")
 ALPACA_SECRET_KEY = os.environ.get("ALPACA_SECRET_KEY", "")
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT / "data"))
-BARS_DIR = DATA_DIR / "bars"
+BARS_DIR = DATA_DIR / "bars"            # full-market (SIP) bars: trade outcomes in backtests
+BARS_IEX_DIR = DATA_DIR / "bars_iex"    # IEX bars: what the live engine sees, so the models learn from them
 MODEL_DIR = DATA_DIR / "models"
 REPORT_DIR = DATA_DIR / "reports"
 DB_PATH = Path(os.environ.get("DB_PATH", DATA_DIR / "app.db"))
-for _d in (BARS_DIR, MODEL_DIR, REPORT_DIR):
+for _d in (BARS_DIR, BARS_IEX_DIR, MODEL_DIR, REPORT_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
-# 25 liquid tickers across sectors, price levels and volatility profiles.
+# 30 liquid tickers across sectors, price levels and volatility profiles.
 # Used for training and backtesting; the trained model is pooled and uses
 # scale-free features, so it also scores tickers outside this list.
 TRAIN_TICKERS = [
@@ -31,14 +32,13 @@ TRAIN_TICKERS = [
     "DIS",                                                                     # media
     "PLTR", "COIN", "SOFI",                                                    # high beta
     "F",                                                                       # low priced
+    "AVGO", "V", "CVX", "HD", "KO",                                            # added 2026-11-18 (30 in all)
 ]
 CONTEXT_TICKERS = ["SPY", "QQQ"]
-# The paper bot watches the training tickers plus 75 more liquid, easy-to-short names
-BOT_TICKERS = TRAIN_TICKERS + """
-    INTC QCOM AVGO MU ORCL CRM ADBE CSCO IBM UBER SHOP PYPL ABNB SNOW PANW CRWD MRVL SMCI ARM DELL
-    C WFC MS SCHW V MA AXP BLK CVX COP OXY SLB HAL JNJ MRK ABBV BMY AMGN GILD CVS MRNA
-    KO PEP PG MCD SBUX NKE TGT HD LOW CMG GE HON UPS DE LMT RTX UNP T VZ CMCSA TMUS
-    RIVN NIO HOOD MARA RIOT SNAP RBLX DKNG AAL DAL UAL CCL GM""".split()
+# The paper bot trades only tickers the models were trained and backtested on
+BOT_TICKERS = list(TRAIN_TICKERS)
+# Timeframes the paper bot follows (1-minute signals: worst in the backtest and live, entries too slow to match)
+BOT_TIMEFRAMES = [3, 5, 15]
 HISTORY_YEARS = 5   # two years to learn from, then a three-year out-of-sample backtest
 BACKTEST_YEARS = 3
 

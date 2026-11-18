@@ -34,7 +34,7 @@ env:
   ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
   DATA_DIR: ${{ github.workspace }}/botdata
   ALLOW_UNVALIDATED: "true"   # the signal models have not passed validation; follow their signals anyway
-  MAX_STACKED_SIGNALS: "3"    # up to three open signals per ticker and timeframe, same direction only
+  MAX_STACKED_SIGNALS: "1"    # up to three open signals per ticker and timeframe, same direction only
 
 jobs:
   morning:

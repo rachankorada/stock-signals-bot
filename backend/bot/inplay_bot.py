@@ -2,7 +2,7 @@
 
 Each trading day:
   before the open  build the baseline for every stock (daily range, usual opening volume)
-  09:35 ET         rank stocks by opening volume against their own recent opens, keep the top 40,
+  09:35 ET         rank stocks by opening volume against their own recent opens, keep the top 10,
                    and place a breakout entry order with an attached stop and take-profit for each
   15:30 ET         cancel entries that never triggered
   15:55 ET         close every position the bot opened
@@ -49,10 +49,10 @@ DIR.mkdir(parents=True, exist_ok=True)
 STOP_FRAC = 0.10            # stop distance as a share of the 14-day average daily range
 TAKE_PROFIT_R = 3           # take-profit, in stop distances from the fill (tick replay: steadier than holding to the close)
 from backend.bot.signal_bot import shares  # noqa: E402  (one sizing rule for both bots)
-TOP_N = 40                  # candidates traded per day (the backtest used 20)
-# 40 entry orders sit in the account at once and Alpaca sets buying power aside for each, so these stay
-# small (40 x 2.5% = the account's equity) and leave the other half of buying power to the signal follower
-MAX_POSITION_FRAC = 0.025
+TOP_N = 10                  # candidates traded per day (tick replay: ranks 1-10 carry the edge, 11-20 about nothing)
+# 10 entry orders sit in the account at once and Alpaca sets buying power aside for each
+# (10 x 10% = the account's equity), leaving the rest of buying power to the signal follower
+MAX_POSITION_FRAC = 0.10
 MIN_USUAL_OPEN_VOLUME = 300  # IEX shares; below this the relative-volume ratio is noise
 LATEST_START_MIN = 8        # minutes after 09:35 beyond which the day's entries are skipped
 PREFIX = "inplay"

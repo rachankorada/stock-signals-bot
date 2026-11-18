@@ -109,6 +109,7 @@ def run(until: str = None):
 
         if done["scan"] and not done["flatten"]:
             guarded("stocks-in-play stop update", inplay_bot.move_stops, trading, today)
+        guarded("stale signal entries", signal_bot.cancel_stale_entries, trading, today)
 
         if not done["cancel"] and boundary >= closes - timedelta(minutes=30):
             done["cancel"] = True
@@ -132,6 +133,38 @@ def run(until: str = None):
     report()
 
 
+def slippage(trading) -> pd.DataFrame:
+    """How far real fills landed from the planned prices, every day since the bots started, in R
+    (stop distances) and basis points. Positive = worse than planned."""
+    first = pd.Timestamp(signal_bot.FIRST_DAY)
+    today = now().tz_localize(None).normalize()
+    days = [pd.Timestamp(d.date) for d in trading.get_calendar(GetCalendarRequest(start=first.date(), end=today.date()))]
+    rows = []
+    for day in days:
+        for o in signal_bot.day_orders(trading, day):
+            cid = o.client_order_id or ""
+            bot = "signals" if cid.startswith("sig-") else "stocks in play" if cid.startswith("inplay-") else None
+            if bot is None or not o.filled_avg_price:
+                continue
+            d = 1 if o.side.value == "buy" else -1
+            risk = int(cid.split("-")[-1].rstrip("m")) / 10000
+            fill = float(o.filled_avg_price)
+            stop_leg = next((l for l in o.legs or [] if l.type.value == "stop"), None)
+            if bot == "signals" and stop_leg is not None:
+                planned = float(stop_leg.stop_price) + d * risk     # the signal's own entry price
+            elif bot == "stocks in play":
+                planned = float(o.stop_price) if o.stop_price else None   # market entries have no planned price
+            else:
+                planned = None
+            if planned:
+                rows.append({"bot": bot, "what": "entry", "R": d * (fill - planned) / risk, "bps": d * (fill - planned) / planned * 1e4})
+            for leg in o.legs or []:
+                if leg.type.value == "stop" and leg.filled_avg_price:
+                    sp, fp = float(leg.stop_price), float(leg.filled_avg_price)
+                    rows.append({"bot": bot, "what": "stop exit", "R": d * (sp - fp) / risk, "bps": d * (sp - fp) / sp * 1e4})
+    return pd.DataFrame(rows)
+
+
 def report():
     print("=" * 30, "STOCKS IN PLAY", "=" * 30)
     guarded("stocks-in-play report", inplay_bot.report)
@@ -145,6 +178,12 @@ def report():
         print(f"  {p.symbol:6s} {'LONG ' if float(p.qty) > 0 else 'SHORT'} {abs(float(p.qty)):>6.0f} shares  "
               f"entry {float(p.avg_entry_price):.2f}  now {float(p.current_price):.2f}  P&L ${float(p.unrealized_pl):+,.2f}")
     print(f"Account equity: ${float(trading.get_account().equity):,.2f}")
+    s = guarded("slippage", slippage, trading)
+    if s is not None and len(s):
+        print("\nSlippage, real fill vs planned price (positive = worse), every day so far:")
+        t = s.groupby(["bot", "what"]).agg(fills=("R", "size"), median_R=("R", "median"), median_bps=("bps", "median"),
+                                           mean_bps=("bps", "mean"))
+        print(t.round(2).to_string())
 
 
 if __name__ == "__main__":

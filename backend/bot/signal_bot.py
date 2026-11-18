@@ -1,7 +1,10 @@
 """Follow every signal the site posts, the way a subscriber would (Alpaca PAPER account only).
 
-  signal posted        buy (or short) at market straight away, with the signal's stop and first
-                       target attached as real orders
+  signal posted        buy (or short) straight away with a limit order no more than a quarter of the
+                       stop distance past the signal price (the backtest skips a signal whose price has
+                       run further than that), with the signal's stop and first target attached as real
+                       orders; an entry not filled within a minute is cancelled
+  after a stop-out     no new signal on that ticker for COOLDOWN_MIN minutes
   target or stop hit   the attached order closes the trade
   signal ends another  if the site says the signal is over (expired, stopped, runner finished) and the
   way                  trade is still open, the bot cancels what is left and exits at market
@@ -21,7 +24,8 @@ import numpy as np
 import pandas as pd
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
-from alpaca.trading.requests import GetCalendarRequest, GetOrderByIdRequest, GetOrdersRequest, MarketOrderRequest, StopLossRequest, TakeProfitRequest
+from alpaca.trading.requests import (GetCalendarRequest, GetOrderByIdRequest, GetOrdersRequest, LimitOrderRequest,
+                                     MarketOrderRequest, StopLossRequest, TakeProfitRequest)
 
 from backend import config
 from backend.data.alpaca_data import ET
@@ -33,6 +37,9 @@ RISK_FRAC = float(os.environ.get("BOT_RISK_FRAC", "0.01"))
 # positions. At 10%, about ten trades can be open together alongside the stocks-in-play orders.
 MAX_POSITION_FRAC = float(os.environ.get("BOT_MAX_POSITION_FRAC", "0.10"))
 FIRST_DAY = "2026-11-17"
+ENTRY_CHASE_R = 0.25      # furthest past the signal price an entry may fill, in stop distances (as in the backtest)
+ENTRY_WAIT_S = 60         # an entry still unfilled after this long is cancelled
+COOLDOWN_MIN = 15         # after a stop-out, no new signal on that ticker for this many minutes
 OPEN = ("new", "accepted", "held", "partially_filled", "pending_new", "accepted_for_bidding")
 
 log = logging.getLogger("signals")
@@ -75,6 +82,8 @@ def shares(risk_per_share: float, price: float, equity: float, cap_frac: float, 
 def place(trading: TradingClient, sig: dict, equity: float):
     """Enter a new signal at market with its stop and first target attached."""
     sym, d = sig["symbol"], sig["direction"]
+    if sig["timeframe"] not in config.BOT_TIMEFRAMES:
+        return
     qty = shares(sig["risk"], sig["entry"], equity, MAX_POSITION_FRAC, one_share_up_to=0.25)
     if qty < 1:
         log.info("signal %s %s: size rounds to zero, skipped", sig["id"], sym)
@@ -87,11 +96,16 @@ def place(trading: TradingClient, sig: dict, equity: float):
     if others:
         log.info("signal %s %s: ticker in use by the other strategy, skipped", sig["id"], sym)
         return
+    stopped_at = last_stop_out(trading, sym)
+    if stopped_at is not None and pd.Timestamp.now(tz=ET) - stopped_at < pd.Timedelta(minutes=COOLDOWN_MIN):
+        log.info("signal %s %s: stopped out at %s, cooling down, skipped", sig["id"], sym, f"{stopped_at:%H:%M}")
+        return
     try:
-        trading.submit_order(MarketOrderRequest(
+        trading.submit_order(LimitOrderRequest(
             # Good till cancelled: if neither level is hit by the close, the trade is held overnight with its
             # stop and target still working
             symbol=sym, qty=qty, side=OrderSide.BUY if d > 0 else OrderSide.SELL, time_in_force=TimeInForce.GTC,
+            limit_price=round(sig["entry"] + d * ENTRY_CHASE_R * sig["risk"], 2),
             order_class=OrderClass.BRACKET, client_order_id=order_id(sig),
             take_profit=TakeProfitRequest(limit_price=round(sig["tp1"], 2)),
             stop_loss=StopLossRequest(stop_price=round(sig["stop"], 2))))
@@ -100,6 +114,29 @@ def place(trading: TradingClient, sig: dict, equity: float):
                  sig["entry"], sig["stop"], sig["tp1"])
     except Exception as exc:
         log.warning("signal %s %s: order rejected: %s", sig["id"], sym, str(exc)[:200])
+
+
+def last_stop_out(trading: TradingClient, sym: str):
+    """When this bot's most recent stop-out on a ticker happened today (None if it has not)."""
+    today = pd.Timestamp.now(tz=ET).tz_localize(None).normalize()
+    times = [pd.Timestamp(leg.filled_at).tz_convert(ET)
+             for o in day_orders(trading, today, symbol=sym) if (o.client_order_id or "").startswith(PREFIX + "-")
+             for leg in (o.legs or []) if leg.type.value == "stop" and leg.filled_at]
+    return max(times) if times else None
+
+
+def cancel_stale_entries(trading: TradingClient, today: pd.Timestamp):
+    """Cancel entry orders that have waited longer than ENTRY_WAIT_S without a fill: the price has moved away
+    from the signal, which the backtest would have skipped."""
+    now = pd.Timestamp.now(tz="UTC")
+    for o in trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500)):
+        if ((o.client_order_id or "").startswith(PREFIX + "-") and float(o.filled_qty or 0) == 0
+                and now - pd.Timestamp(o.submitted_at) > pd.Timedelta(seconds=ENTRY_WAIT_S)):
+            try:
+                trading.cancel_order_by_id(o.id)
+                log.info("%s: entry not filled within %ds, cancelled", o.symbol, ENTRY_WAIT_S)
+            except Exception as exc:
+                log.warning("%s: could not cancel a stale entry: %s", o.symbol, str(exc)[:200])
 
 
 def close_out(trading: TradingClient, parent):
