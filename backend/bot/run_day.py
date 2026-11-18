@@ -107,6 +107,9 @@ def run(until: str = None):
         except Exception:
             log.exception("signal engine error at %s", f"{boundary:%H:%M}")
 
+        if done["scan"] and not done["flatten"]:
+            guarded("stocks-in-play stop update", inplay_bot.move_stops, trading, today)
+
         if not done["cancel"] and boundary >= closes - timedelta(minutes=30):
             done["cancel"] = True
             guarded("stocks-in-play cancel", inplay_bot.cancel_untriggered, trading, today)

@@ -36,7 +36,8 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, QueryOrderStatus, TimeInForce
-from alpaca.trading.requests import GetCalendarRequest, GetOrdersRequest, MarketOrderRequest, StopLossRequest, StopOrderRequest
+from alpaca.trading.requests import (GetCalendarRequest, GetOrdersRequest, MarketOrderRequest, ReplaceOrderRequest,
+                                     StopLossRequest, StopOrderRequest)
 
 from backend import config
 from backend.data.alpaca_data import ET, client
@@ -214,6 +215,59 @@ def cancel_untriggered(trading: TradingClient, today: pd.Timestamp):
 
 
 EXIT_PREFIX = "ipx"   # this strategy's own market exits
+LIVE_LEG = ("new", "accepted", "held", "pending_new", "pending_replace", "replaced")
+
+
+def latest_price(sym: str) -> float:
+    from alpaca.data.requests import StockLatestTradeRequest
+    return float(client().get_stock_latest_trade(StockLatestTradeRequest(symbol_or_symbols=sym, feed=DataFeed.IEX))[sym].price)
+
+
+def move_stops(trading: TradingClient, today: pd.Timestamp):
+    """Once an entry has filled, put its stop exactly one stop distance from the fill price, as in the
+    backtest. The stop is first placed from the breakout level, so a fill beyond the level (a market
+    entry, or slippage on the stop entry) would otherwise start the trade with more than 1R at risk.
+    Stops are only ever tightened. If the price is already past the new stop, the trade is closed
+    at market, which is what the backtest does."""
+    for o in our_orders(trading, QueryOrderStatus.ALL, today):
+        filled = float(o.filled_qty or 0)
+        if filled < 1 or not o.filled_avg_price:
+            continue
+        d = 1 if o.side == OrderSide.BUY else -1
+        risk = int(o.client_order_id.split("-")[3].rstrip("m")) / 10000
+        target = round(float(o.filled_avg_price) - d * risk, 2)
+        for leg in o.legs or []:
+            if leg.status.value not in LIVE_LEG or leg.stop_price is None:
+                continue
+            old = float(leg.stop_price)
+            if d * (target - old) < 0.005:   # already there (or the new stop would be looser)
+                continue
+            try:
+                trading.replace_order_by_id(leg.id, ReplaceOrderRequest(stop_price=target))
+                log.info("%s stop moved %.2f -> %.2f (1R from the %.2f fill)", o.symbol, old, target, float(o.filled_avg_price))
+                continue
+            except Exception as exc:
+                problem = exc
+            try:
+                price = latest_price(o.symbol)
+            except Exception:
+                price = float("nan")
+            if not np.isfinite(price) or d * (price - target) > 0:   # unknown price, or not past the stop yet
+                log.warning("%s stop not moved, will retry: %s", o.symbol, problem)
+                continue
+            # Already through the 1R stop: close the remaining shares now
+            left = filled - float(leg.filled_qty or 0)
+            trading.cancel_order_by_id(leg.id)
+            for attempt in range(5):
+                time.sleep(1)
+                try:
+                    trading.submit_order(MarketOrderRequest(
+                        symbol=o.symbol, qty=left, side=OrderSide.SELL if d > 0 else OrderSide.BUY,
+                        time_in_force=TimeInForce.DAY, client_order_id=f"{EXIT_PREFIX}-{today:%Y%m%d}-{o.symbol}-s{attempt}"))
+                    log.info("%s already past its 1R stop %.2f (last %.2f); closed at market", o.symbol, target, price)
+                    break
+                except Exception:
+                    log.exception("%s market exit attempt %d failed", o.symbol, attempt + 1)
 
 
 def held_by_us(trading: TradingClient, today: pd.Timestamp) -> dict:
