@@ -13,7 +13,10 @@ for ($try = 1; $try -le 8; $try++) {
     $today = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd")
     $json = & $gh run list -R $repo --workflow trading-day.yml --created $today --json status 2>$null
     if ($LASTEXITCODE -eq 0) {
-        $active = @($json | ConvertFrom-Json | Where-Object { $_.status -ne "completed" })
+        # Windows PowerShell 5.1 passes a JSON array down a pipe as one object, so an empty list
+        # "[]" would look like one run with no status. Store it first so the runs are enumerated.
+        $runs = $json | ConvertFrom-Json
+        $active = @($runs | Where-Object { $_.status -and $_.status -ne "completed" })
         if ($active.Count -gt 0) { Log "a run is already $($active[0].status); nothing to do"; exit 0 }
         & $gh workflow run trading-day.yml -R $repo -f mode=day 2>$null
         if ($LASTEXITCODE -eq 0) { Log "started today's run"; exit 0 }
