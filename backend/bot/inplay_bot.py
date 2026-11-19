@@ -365,11 +365,27 @@ def protect(trading: TradingClient, orders: list, today: pd.Timestamp):
             log.exception("%s: could not replace the missing stop", sym)
 
 
+def later_exits(trading: TradingClient, day: pd.Timestamp, days_after: int = 7) -> list:
+    """This strategy's exits for one day that were sent on a later date (a leftover sent after hours
+    or at the next open)."""
+    out, today = [], now().tz_localize(None).normalize()
+    for i in range(1, days_after + 1):
+        d = day + pd.Timedelta(days=i)
+        if d > today:
+            break
+        out += [o for o in day_orders(trading, QueryOrderStatus.ALL, d)
+                if (o.client_order_id or "").startswith(f"{EXIT_PREFIX}-{day:%Y%m%d}-")]
+    return out
+
+
 def held_by_us(trading: TradingClient, today: pd.Timestamp) -> dict:
     """Shares this strategy still holds per ticker (signed), from its own orders only, so a signal
     trade in the same ticker is never touched."""
     held = {}
-    for o in day_orders(trading, QueryOrderStatus.ALL, today):
+    orders = day_orders(trading, QueryOrderStatus.ALL, today)
+    if today < now().tz_localize(None).normalize():
+        orders += later_exits(trading, today)
+    for o in orders:
         cid = o.client_order_id or ""
         if cid.startswith(f"{PREFIX}-{today:%Y%m%d}-"):
             d = 1 if o.side == OrderSide.BUY else -1
@@ -450,7 +466,9 @@ def close_leftovers(trading: TradingClient, today: pd.Timestamp, days_back: int 
 def day_trades(trading: TradingClient, plan: dict, today: pd.Timestamp) -> pd.DataFrame:
     """Each trade's result for one day, worked out from the account's actual fills."""
     fills = []
-    for o in day_orders(trading, QueryOrderStatus.CLOSED, today):
+    closed = day_orders(trading, QueryOrderStatus.CLOSED, today)
+    closed += [o for o in later_exits(trading, today) if o.status.value == "filled"]
+    for o in closed:
         cid = o.client_order_id or ""
         if not (cid.startswith(f"{PREFIX}-") or cid.startswith(f"{EXIT_PREFIX}-")):
             continue  # another strategy's order in the same ticker

@@ -9,13 +9,17 @@ name: trading-day
 
 on:
   schedule:
-    - cron: "55 12 * * 1-5"
-    # Backups: GitHub sometimes skips a scheduled start. A backup that fires while the day's run is
-    # going waits in the queue until that run ends after the close, then finds the market shut and exits.
+    # GitHub often starts scheduled runs late (by eight hours on 2026-11-18), so the first tries are
+    # in the small hours: a run that starts early waits (the "wait" job) until 12:55 UTC. Off the
+    # top of the hour, when GitHub is least busy. Later ones are backups; a backup that fires while
+    # the day's run is going waits in the queue until that run ends, then finds the market shut and exits.
+    - cron: "23 8 * * 1-5"
+    - cron: "47 9 * * 1-5"
+    - cron: "13 11 * * 1-5"
+    - cron: "37 12 * * 1-5"
     - cron: "17 13 * * 1-5"
     - cron: "41 13 * * 1-5"
     - cron: "7 14 * * 1-5"
-    - cron: "33 14 * * 1-5"
   workflow_dispatch:
     inputs:
       mode:
@@ -37,12 +41,25 @@ env:
   MAX_STACKED_SIGNALS: "1"    # up to three open signals per ticker and timeframe, same direction only
 
 jobs:
+  # An early start waits here until 12:55 UTC (07:55 ET in winter, 08:55 ET in summer) so the
+  # morning job's six hours cover the morning
+  wait:
+    if: github.event_name == 'schedule' || inputs.mode == 'day'
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - run: |
+          target=$(date -u -d "today 12:55" +%s); now=$(date -u +%s)
+          if [ "$now" -lt "$target" ]; then echo "waiting $(( (target - now) / 60 )) minutes"; sleep $(( target - now )); fi
+
   morning:
+    needs: wait
+    if: always() && !cancelled()
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -60,7 +77,7 @@ jobs:
       - name: Trade the morning
         if: github.event_name == 'schedule' || inputs.mode == 'day'
         run: python -m backend.bot.run_day --until 12:30
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: morning-${{ github.run_id }}
@@ -73,22 +90,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: backend/bot/requirements.txt
       - run: pip install -r backend/bot/requirements.txt
       - run: mkdir -p botdata/models && cp backend/bot/models/* botdata/models/
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         continue-on-error: true
         with:
           name: morning-${{ github.run_id }}
           path: botdata/bot/
       - name: Trade the afternoon and close out
         run: python -m backend.bot.run_day
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: day-${{ github.run_id }}
