@@ -258,7 +258,9 @@ def move_stops(trading: TradingClient, today: pd.Timestamp):
         follows TRAIL_R behind that best price (no fixed take-profit)
     Stops are only ever tightened. If the price is already past the new stop, the trade is closed at
     market, which is what the backtest does."""
-    filled_orders = [o for o in our_orders(trading, QueryOrderStatus.ALL, today)
+    orders = our_orders(trading, QueryOrderStatus.ALL, today)
+    protect(trading, orders, today)
+    filled_orders = [o for o in orders
                      if float(o.filled_qty or 0) >= 1 and o.filled_avg_price and o.filled_at
                      and any(leg.status.value in LIVE_LEG for leg in o.legs or [])]
     if not filled_orders:
@@ -323,6 +325,46 @@ def move_stops(trading: TradingClient, today: pd.Timestamp):
                     log.exception("%s market exit attempt %d failed", o.symbol, attempt + 1)
 
 
+def protect(trading: TradingClient, orders: list, today: pd.Timestamp):
+    """Give a stop to any trade that is held without one. Alpaca sometimes cancels the attached stop
+    the moment the entry fills (VIST, AMT and UGI on 2026-11-19; VIST then lost 9.5R). The new stop
+    is a plain DAY stop 1R from the fill; if the price is already past that, the trade is closed now."""
+    held = held_by_us(trading, today)
+    working = {o.symbol for o in day_orders(trading, QueryOrderStatus.OPEN, today)
+               if (o.client_order_id or "").startswith(f"{EXIT_PREFIX}-{today:%Y%m%d}-")}
+    for o in orders:
+        sym = o.symbol
+        if sym not in held or sym in working or not o.filled_avg_price:
+            continue
+        if any(leg.status.value in LIVE_LEG + ("partially_filled",) for leg in o.legs or []):
+            continue
+        d = 1 if o.side == OrderSide.BUY else -1
+        qty = abs(held[sym])
+        risk = int(o.client_order_id.split("-")[3].rstrip("m")) / 10000
+        stop = round(float(o.filled_avg_price) - d * risk, 2)
+        side = OrderSide.SELL if d > 0 else OrderSide.BUY
+        n = sum(1 for x in day_orders(trading, QueryOrderStatus.ALL, today)
+                if (x.client_order_id or "").startswith(f"{EXIT_PREFIX}-{today:%Y%m%d}-{sym}-p"))
+        cid = f"{EXIT_PREFIX}-{today:%Y%m%d}-{sym}-p{n}"
+        try:
+            price = latest_price(sym)
+        except Exception:
+            price = float("nan")
+        try:
+            if np.isfinite(price) and d * (price - stop) <= 0:
+                trading.submit_order(MarketOrderRequest(symbol=sym, qty=qty, side=side,
+                                                        time_in_force=TimeInForce.DAY, client_order_id=cid))
+                log.warning("%s was held without a stop and is already past %.2f (last %.2f); closed at market",
+                            sym, stop, price)
+            else:
+                trading.submit_order(StopOrderRequest(symbol=sym, qty=qty, side=side, stop_price=stop,
+                                                      time_in_force=TimeInForce.DAY, client_order_id=cid))
+                log.warning("%s was held without a stop; new stop at %.2f", sym, stop)
+            working.add(sym)
+        except Exception:
+            log.exception("%s: could not replace the missing stop", sym)
+
+
 def held_by_us(trading: TradingClient, today: pd.Timestamp) -> dict:
     """Shares this strategy still holds per ticker (signed), from its own orders only, so a signal
     trade in the same ticker is never touched."""
@@ -345,14 +387,24 @@ def flatten(trading: TradingClient, plan: dict, today: pd.Timestamp):
         try:
             # ALL, not OPEN: a filled entry no longer counts as open, but its stop does, and the stop
             # holds the shares the exit needs (on 2026-11-18 this left 13 trades open overnight)
-            for o in our_orders(trading, QueryOrderStatus.ALL, today):
-                for order in [o] + list(o.legs or []):
-                    if order.status.value in LIVE_LEG + ("partially_filled",):
+            # Includes the stand-in stops from protect(). Wait for the cancels to land: an exit sent
+            # while a stop is still being cancelled is refused (VVV and UGI on 2026-11-19)
+            for wait in range(10):
+                live = [order for o in day_orders(trading, QueryOrderStatus.ALL, today)
+                        if (o.client_order_id or "").startswith((f"{PREFIX}-{today:%Y%m%d}-",
+                                                                 f"{EXIT_PREFIX}-{today:%Y%m%d}-"))
+                        for order in [o] + list(o.legs or [])
+                        if order.status.value in LIVE_LEG + ("partially_filled", "pending_cancel")
+                        and order.type.value != "market"]   # never cancel an exit already on its way
+                if not live:
+                    break
+                for order in live:
+                    if order.status.value != "pending_cancel":
                         try:
                             trading.cancel_order_by_id(order.id)
                         except Exception:
                             pass
-            time.sleep(2)
+                time.sleep(1)
             open_now = held_by_us(trading, today)
             for sym, qty in open_now.items():
                 trading.submit_order(MarketOrderRequest(
