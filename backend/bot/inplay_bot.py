@@ -67,7 +67,7 @@ MAX_POSITION_FRAC = 0.10
 MIN_USUAL_OPEN_VOLUME = 300  # IEX shares; below this the relative-volume ratio is noise
 LATEST_START_MIN = 8        # minutes after 09:35 beyond which the day's entries are skipped
 PREFIX = "inplay"
-FIRST_DAY = "2026-11-17"     # the report starts here
+FIRST_DAY = "2026-11-20"     # the report starts here
 FIVE_MIN = TimeFrame(5, TimeFrameUnit.Minute)
 
 log = logging.getLogger("bot")

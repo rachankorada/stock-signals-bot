@@ -36,7 +36,7 @@ RISK_FRAC = float(os.environ.get("BOT_RISK_FRAC", "0.01"))
 # Cap on one trade's size, as a share of account equity. Very tight stops would otherwise ask for huge
 # positions. At 10%, about ten trades can be open together alongside the stocks-in-play orders.
 MAX_POSITION_FRAC = float(os.environ.get("BOT_MAX_POSITION_FRAC", "0.10"))
-FIRST_DAY = "2026-11-17"
+FIRST_DAY = "2026-11-20"
 ENTRY_CHASE_R = 0.25      # furthest past the signal price an entry may fill, in stop distances (as in the backtest)
 ENTRY_WAIT_S = 60         # an entry still unfilled after this long is cancelled
 COOLDOWN_MIN = 15         # after a stop-out, no new signal on that ticker for this many minutes
