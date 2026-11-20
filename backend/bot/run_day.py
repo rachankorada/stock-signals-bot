@@ -1,9 +1,12 @@
 """One process for the whole trading day: both paper-trading bots, minute by minute.
 
-  signal follower   runs the site's live signal engine on the 25 tickers and trades every signal
+  signal follower   runs the site's live signal engine on the 30 tickers and trades every signal
                     it posts as it appears and ends (see signal_bot.py)
   stocks in play    09:35 scan and breakout orders, 09:50 cancel untriggered, trailing stops,
                     15:55 close out (see inplay_bot.py)
+
+Stocks in play is OFF unless the environment sets INPLAY=on (since 2026-11-20 the bot follows the
+site's signals only); leftover stocks-in-play shares are still closed either way.
 
 Stocks-in-play trades are closed five minutes before the bell; signal trades that have hit neither
 level are held overnight with their stop and target working. The run can be cut in two
@@ -17,6 +20,7 @@ Run:  python -m backend.bot.run_day
 import ctypes
 import json
 import logging
+import os
 import sys
 import time
 from datetime import timedelta
@@ -32,6 +36,7 @@ from backend.engine.live import LiveRunner
 
 DIR = inplay_bot.DIR
 log = logging.getLogger("day")
+INPLAY_ON = os.environ.get("INPLAY", "off").lower() == "on"
 DAILY_LOSS_LIMIT = 0.03   # no new signal trades once equity is this far below the previous close
 
 
@@ -78,7 +83,8 @@ def run(until: str = None):
     # Stocks in play: the baseline must be ready before 09:35
     scan_at = opens + timedelta(minutes=5)
     prep = None
-    if now() < scan_at - timedelta(minutes=1) and not inplay_bot.plan_from_orders(trading, today):
+    log.info("stocks in play is %s", "ON" if INPLAY_ON else "off; following the site's signals only")
+    if INPLAY_ON and now() < scan_at - timedelta(minutes=1) and not inplay_bot.plan_from_orders(trading, today):
         prep = guarded("stocks-in-play baseline", inplay_bot.prepare, trading, today)
 
     # Signal follower: the site's own engine, with its open signals kept in a file
@@ -88,7 +94,7 @@ def run(until: str = None):
     symbols = config.BOT_TICKERS
     log.info("signal engine ready: %d tickers, models for %s", len(symbols), sorted(engine.models))
 
-    done = {"scan": prep is None, "window": False, "cancel": False, "flatten": False}
+    done = {"scan": prep is None or not INPLAY_ON, "window": False, "cancel": False, "flatten": False}
     while True:
         boundary = now().floor("min") + pd.Timedelta(minutes=1)
         time.sleep(max((boundary - now()).total_seconds() + 2, 0))
@@ -123,14 +129,14 @@ def run(until: str = None):
         except Exception:
             log.exception("signal engine error at %s", f"{boundary:%H:%M}")
 
-        if not done["window"] and boundary >= scan_at + timedelta(minutes=inplay_bot.ENTRY_WINDOW_MIN):
+        if INPLAY_ON and not done["window"] and boundary >= scan_at + timedelta(minutes=inplay_bot.ENTRY_WINDOW_MIN):
             done["window"] = True
             guarded("stocks-in-play entry window", inplay_bot.cancel_untriggered, trading, today)
         if done["scan"] and not done["flatten"]:
             guarded("stocks-in-play stop update", inplay_bot.move_stops, trading, today)
         guarded("stale signal entries", signal_bot.cancel_stale_entries, trading, today)
 
-        if not done["cancel"] and boundary >= closes - timedelta(minutes=30):
+        if INPLAY_ON and not done["cancel"] and boundary >= closes - timedelta(minutes=30):
             done["cancel"] = True
             guarded("stocks-in-play cancel", inplay_bot.cancel_untriggered, trading, today)
         if not done["flatten"] and boundary >= closes - timedelta(minutes=5):
