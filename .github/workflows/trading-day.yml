@@ -86,7 +86,7 @@ jobs:
 
   afternoon:
     needs: morning
-    if: always() && (github.event_name == 'schedule' || inputs.mode == 'day')
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.mode == 'day') }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
