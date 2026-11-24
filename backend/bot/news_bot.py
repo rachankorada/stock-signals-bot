@@ -47,6 +47,24 @@ def strength(score: float) -> str:
     return next((name for cut, name in LEVELS if abs(score) >= cut), "none")
 
 
+def method() -> str:
+    """Which reader scores headlines: 'finbert' or 'keywords' (after the first call)."""
+    return "finbert" if _finbert else "keywords"
+
+
+def read_headlines(texts: list) -> np.ndarray:
+    """A score in [-1, 1] per headline: FinBERT, or a keyword reading if FinBERT cannot load."""
+    return _score_texts(texts)
+
+
+def combine(article_scores, n_symbols) -> float:
+    """A ticker's score from its articles: one-ticker articles count fully, two-ticker articles half,
+    others not at all; pulled toward zero when there are few articles."""
+    a = np.asarray(article_scores, dtype=float); n = np.asarray(n_symbols)
+    w = np.where(n == 1, 1.0, np.where(n == 2, 0.5, 0.0))
+    return float((w * a).sum() / (w.sum() + 1)) if len(a) else 0.0
+
+
 def _score_texts(texts: list) -> np.ndarray:
     global _finbert
     if _finbert is None:
@@ -87,9 +105,8 @@ def scores(symbols: list, since: pd.Timestamp, until: pd.Timestamp = None) -> pd
             if new:
                 for i, s in zip(new, _score_texts(news.loc[new, "headline"].tolist())):
                     _seen[i] = float(s)
-            w = np.where(news["n_symbols"] == 1, 1.0, 0.5)
             fb = np.array([_seen[i] for i in news.index])
-            score = float((w * fb).sum() / (w.sum() + 1))
+            score = combine(fb, news["n_symbols"])
             top = news.iloc[int(np.argmax(np.abs(fb)))]["headline"]
         else:
             score, top = 0.0, ""

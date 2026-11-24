@@ -30,6 +30,13 @@ CREATE INDEX IF NOT EXISTS idx_signals_status ON signals (status);
 CREATE TABLE IF NOT EXISTS push_subs (
     id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, endpoint TEXT UNIQUE NOT NULL, sub TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS news (
+    id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, headline TEXT NOT NULL, source TEXT, url TEXT,
+    n_symbols INTEGER NOT NULL, score REAL NOT NULL, scored_by TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_news_time ON news (created_at);
+CREATE TABLE IF NOT EXISTS news_symbols (
+    news_id INTEGER NOT NULL, symbol TEXT NOT NULL, PRIMARY KEY (news_id, symbol));
+CREATE INDEX IF NOT EXISTS idx_news_symbol ON news_symbols (symbol, news_id);
 """
 
 DEFAULT_SETTINGS = {

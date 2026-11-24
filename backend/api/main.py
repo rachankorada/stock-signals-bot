@@ -21,6 +21,7 @@ from backend.data.bars import resample
 from backend.engine import paper, push
 from backend.engine.core import Engine, make_pool
 from backend.engine.live import LiveRunner, fetch_many
+from backend.engine.news_feed import NewsFeed, ticker_scores
 from backend.strategies.library import LABELS
 
 log = logging.getLogger("api")
@@ -58,6 +59,16 @@ class Hub:
     def remove(self, user_id: int, ws: WebSocket):
         self.sockets.get(user_id, set()).discard(ws)
 
+    async def dispatch_news(self, event: dict):
+        """Send a new article to every user with that ticker on their watchlist (on the site only)."""
+        users = db.query("SELECT user_id FROM watchlist WHERE symbol = ? AND enabled = 1", (event["symbol"],))
+        for u in users:
+            for ws in list(self.sockets.get(u["user_id"], ())):
+                try:
+                    await ws.send_json(event)
+                except Exception:
+                    self.remove(u["user_id"], ws)
+
     async def dispatch(self, event: dict):
         """Send an engine event to every user watching that ticker."""
         sig = event["signal"]
@@ -82,20 +93,25 @@ class Hub:
 hub = Hub()
 engine: Engine = None
 runner: LiveRunner = None
+news_feed: NewsFeed = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global engine, runner
+    global engine, runner, news_feed
     db.connect()
     live = os.environ.get("ENGINE", "on") != "off"
     pool = make_pool() if live else None
     engine = Engine(pool)
     runner = LiveRunner(engine, hub.dispatch)
     task = asyncio.create_task(runner.run()) if live else None
+    # The news scorer runs around the clock, market open or not
+    news_feed = NewsFeed(hub.dispatch_news)
+    news_task = asyncio.create_task(news_feed.run()) if os.environ.get("NEWS", "on") != "off" else None
     yield
-    if task:
-        task.cancel()
+    for t in (task, news_task):
+        if t:
+            t.cancel()
     if pool:
         pool.shutdown(wait=False, cancel_futures=True)
 
@@ -235,6 +251,33 @@ def toggle_symbol(symbol: str, body: EnabledBody, user=Depends(current_user)):
 def remove_symbol(symbol: str, user=Depends(current_user)):
     db.execute("DELETE FROM watchlist WHERE user_id = ? AND symbol = ?", (user["id"], symbol.upper()))
     return {"ok": True}
+
+
+# ---- news ------------------------------------------------------------------
+
+@app.get("/api/news/scores")
+def news_scores(user=Depends(current_user)):
+    """News score for each ticker on the user's watchlist, since the previous session's close."""
+    symbols = [r["symbol"] for r in user_symbols(user["id"], enabled_only=True)]
+    since = news_feed.since()
+    return {"since": since.isoformat(), "method": "finbert" if db.query(
+                "SELECT 1 FROM news WHERE scored_by = 'finbert' LIMIT 1") else "keywords",
+            "scorer_error": news_feed.error, "tickers": ticker_scores(symbols, since)}
+
+
+@app.get("/api/news")
+def news_list(symbol: str = "", limit: int = 50, user=Depends(current_user)):
+    """Latest articles for the user's watchlist, or for one ticker on it."""
+    mine = [r["symbol"] for r in user_symbols(user["id"])]
+    symbols = [symbol.upper()] if symbol else mine
+    if symbol and symbol.upper() not in mine:
+        raise HTTPException(404, f"{symbol.upper()} is not on your watchlist.")
+    if not symbols:
+        return {"items": []}
+    rows = db.query(f"SELECT n.*, GROUP_CONCAT(s.symbol) AS symbols FROM news n JOIN news_symbols s ON s.news_id = n.id "
+                    f"WHERE n.id IN (SELECT news_id FROM news_symbols WHERE symbol IN ({','.join('?' * len(symbols))})) "
+                    f"GROUP BY n.id ORDER BY n.created_at DESC LIMIT ?", (*symbols, min(max(limit, 1), 200)))
+    return {"items": [{**r, "symbols": (r["symbols"] or "").split(",")} for r in rows]}
 
 
 # ---- signals ---------------------------------------------------------------
