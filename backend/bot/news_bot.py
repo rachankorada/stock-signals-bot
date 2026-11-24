@@ -1,7 +1,12 @@
 """News scores for the signal follower: which tickers have news, which way it leans and how strongly.
 
-Every headline tagged with a ticker since the previous session's close is read by FinBERT (a free
-model trained on financial text; a simple keyword reading is used if FinBERT cannot load). Articles
+Every headline tagged with a ticker since the previous session's close is read twice and the two
+readings are averaged:
+  FinBERT      a free model trained on financial text (tone); a keyword reading if it cannot load
+  news model   our own: a small local language model turns the headline into a meaning vector, and a
+               model trained on 3 years of price reactions maps it (with event flags) to an expected
+               move (backend/research/news_ml_*; models/news_text.joblib). Its strongest 5% of readings
+               count as "strong". On held-out data it did not predict direction (2026-11-23). Articles
 tagged with one ticker count fully, two tickers half, more than two not at all. The ticker's score
 runs from -1 (clearly bad news) to +1 (clearly good) and is pulled toward zero when there are only one
 or two articles:
@@ -42,6 +47,9 @@ CAUTION_SIZE = 0.25
 LEVELS = ((0.6, "strong"), (0.35, "moderate"), (0.15, "weak"))
 
 _finbert = None          # False once it has failed to load
+_ml = None               # our news model; False once it has failed to load
+ML_WEIGHT = 1.0          # share of the news model in each headline's score (the rest is FinBERT).
+                         # 1.0 from 2026-11-25: our model only, FinBERT just a fallback (user's trial)
 _seen = {}               # article id -> score, so each headline is read once per run
 
 
@@ -50,8 +58,52 @@ def strength(score: float) -> str:
 
 
 def method() -> str:
-    """Which reader scores headlines: 'finbert' or 'keywords' (after the first call)."""
-    return "finbert" if _finbert else "keywords"
+    """Which readers score headlines (after the first call)."""
+    if _ml and ML_WEIGHT >= 1:
+        return "news-model"
+    return ("finbert" if _finbert else "keywords") + ("+news-model" if _ml else "")
+
+
+def _load_ml():
+    global _ml
+    if _ml is None:
+        try:
+            import joblib
+            from backend.research.news_ml_text import embed, event_flags
+            _ml = (joblib.load(config.ROOT / "backend" / "bot" / "models" / "news_text.joblib"), embed, event_flags)
+            embed(["warm up"])
+            log.info("news model loaded")
+        except Exception as exc:
+            _ml = False
+            log.warning("news model unavailable (%s); FinBERT only", str(exc)[:120])
+    return _ml
+
+
+def model_scores(texts: list, times: list) -> np.ndarray:
+    """Our news model's reading of each headline in [-1, 1] (0 if it is unavailable). Headlines from
+    the session use the intraday model, the rest the overnight one."""
+    ml = _load_ml()
+    if not ml or not texts:
+        return np.zeros(len(texts))
+    models, embed, event_flags = ml
+    X = np.hstack([embed(texts), event_flags(pd.Series(texts)).to_numpy(np.float32)])
+    out = np.zeros(len(texts))
+    for i, t in enumerate(times):
+        t = pd.Timestamp(t).tz_convert(ET)
+        kind = "intraday" if t.weekday() < 5 and 570 <= t.hour * 60 + t.minute < 930 else "overnight"
+        m = models[kind]
+        out[i] = np.clip(m["text"].predict(X[i:i + 1])[0] / m["scale_bps"] * 0.6, -1, 1)
+    return out
+
+
+def read_articles(texts: list, times: list) -> np.ndarray:
+    """Each headline's score: our news model and FinBERT, mixed by ML_WEIGHT. FinBERT is only loaded
+    when it has a share, or when the news model cannot load."""
+    ml = model_scores(texts, times)
+    if _ml and ML_WEIGHT >= 1:
+        return ml
+    fb = _score_texts(texts)
+    return fb if not _ml else (1 - ML_WEIGHT) * fb + ML_WEIGHT * ml
 
 
 def read_headlines(texts: list) -> np.ndarray:
@@ -105,7 +157,7 @@ def scores(symbols: list, since: pd.Timestamp, until: pd.Timestamp = None) -> pd
         if len(news):
             new = [i for i in news.index if i not in _seen]
             if new:
-                for i, s in zip(new, _score_texts(news.loc[new, "headline"].tolist())):
+                for i, s in zip(new, read_articles(news.loc[new, "headline"].tolist(), news.loc[new, "created_at"].tolist())):
                     _seen[i] = float(s)
             fb = np.array([_seen[i] for i in news.index])
             score = combine(fb, news["n_symbols"])

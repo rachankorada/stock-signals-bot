@@ -59,7 +59,7 @@ def store(articles: list) -> list:
     new = [a for a in articles if a["id"] not in known and a["headline"].strip()]
     if not new:
         return []
-    scores = news_bot.read_headlines([a["headline"] for a in new])
+    scores = news_bot.read_articles([a["headline"] for a in new], [a["created_at"] for a in new])
     how = news_bot.method()
     for a, s in zip(new, scores):
         a["score"] = round(float(s), 4)

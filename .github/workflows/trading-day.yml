@@ -100,13 +100,13 @@ jobs:
             backend/bot/requirements.txt
             backend/bot/requirements-news.txt
       - run: pip install -r backend/bot/requirements.txt
-      - name: News model (FinBERT); the bot reads headlines by keyword if this fails
+      - name: News model libraries (local language model; FinBERT as fallback)
         continue-on-error: true
         run: pip install -r backend/bot/requirements-news.txt
       - uses: actions/cache@v6
         with:
           path: ~/.cache/huggingface
-          key: finbert-v1
+          key: hf-models-v2
       - run: mkdir -p botdata/models && cp backend/bot/models/* botdata/models/
       - name: Check only (places nothing)
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'check'
@@ -141,13 +141,13 @@ jobs:
             backend/bot/requirements.txt
             backend/bot/requirements-news.txt
       - run: pip install -r backend/bot/requirements.txt
-      - name: News model (FinBERT); the bot reads headlines by keyword if this fails
+      - name: News model libraries (local language model; FinBERT as fallback)
         continue-on-error: true
         run: pip install -r backend/bot/requirements-news.txt
       - uses: actions/cache@v6
         with:
           path: ~/.cache/huggingface
-          key: finbert-v1
+          key: hf-models-v2
       - run: mkdir -p botdata/models && cp backend/bot/models/* botdata/models/
       - uses: actions/download-artifact@v8
         continue-on-error: true

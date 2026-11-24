@@ -28,7 +28,7 @@ EVENTS = {
     "macro": r"\b(tariff\w*|fed\b|rates?|inflation|export|ban|sanction\w*|government|trump|china)\b",
     "move": r"\b(shares? (rise|fall|jump|drop|surge|slide|tumble|gain)\w*|stock (rises|falls|jumps|drops|surges)|trading (higher|lower)|movers?)\b",
 }
-_rx = {k: re.compile(v, re.I) for k, v in EVENTS.items()}
+_rx = {k: re.compile(v.replace("(", "(?:"), re.I) for k, v in EVENTS.items()}   # (?: : no capture groups
 
 
 def event_flags(headlines: pd.Series) -> pd.DataFrame:
