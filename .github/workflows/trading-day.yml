@@ -25,9 +25,13 @@ on:
       mode:
         description: "check (places nothing), report, or day (trade the rest of today)"
         default: check
+      wait_chunk:
+        description: "longest single wait in minutes before handing over to a fresh run (testing only)"
+        default: "330"
 
 permissions:
   contents: read
+  actions: write   # each day's run starts the next one (GitHub's own schedule runs hours late)
 
 concurrency:
   group: trading-day
@@ -41,20 +45,48 @@ env:
   MAX_STACKED_SIGNALS: "1"    # up to three open signals per ticker and timeframe, same direction only
 
 jobs:
-  # An early start waits here until 12:55 UTC (07:55 ET in winter, 08:55 ET in summer) so the
-  # morning job's six hours cover the morning
+  # The bot keeps itself going: every trading run ends by starting the next run, and a run waits
+  # here until 12:55 UTC on the next weekday (07:55 ET in winter, 08:55 ET in summer). A job can
+  # only run six hours, so a long wait hands over to a fresh run every few hours. GitHub's schedule
+  # (often hours late) and the laptop's backup start are only fallbacks now. Whichever run is
+  # newest carries the chain on: a newer pending run replaces an older pending one.
   wait:
     if: github.event_name == 'schedule' || inputs.mode == 'day'
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    outputs:
+      handover: ${{ steps.wait.outputs.handover }}
     steps:
-      - run: |
-          target=$(date -u -d "today 12:55" +%s); now=$(date -u +%s)
-          if [ "$now" -lt "$target" ]; then echo "waiting $(( (target - now) / 60 )) minutes"; sleep $(( target - now )); fi
+      - id: wait
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHUNK: ${{ inputs.wait_chunk || '330' }}
+        run: |
+          now=$(date -u +%s)
+          if [ "$(date -u +%u)" -le 5 ] && [ "$now" -lt "$(date -u -d 'today 20:30' +%s)" ]; then
+            target=$(date -u -d "today 12:55" +%s)
+          else
+            for i in 1 2 3 4 5 6 7; do
+              if [ "$(date -u -d "+$i day" +%u)" -le 5 ]; then target=$(date -u -d "$(date -u -d "+$i day" +%F) 12:55" +%s); break; fi
+            done
+          fi
+          left=$(( target - now ))
+          echo "next session start $(date -u -d @$target), $(( left / 60 )) minutes away"
+          if [ "$left" -le $(( CHUNK * 60 )) ]; then
+            if [ "$left" -gt 0 ]; then sleep "$left"; fi
+            echo "handover=false" >> "$GITHUB_OUTPUT"
+          else
+            sleep $(( CHUNK * 60 ))
+            for try in 1 2 3 4 5; do
+              gh workflow run trading-day.yml -R "$GITHUB_REPOSITORY" -f mode=day && break   # the next run waits the normal length
+              sleep 30
+            done
+            echo "handover=true" >> "$GITHUB_OUTPUT"
+          fi
 
   morning:
     needs: wait
-    if: always() && !cancelled()
+    if: ${{ !cancelled() && needs.wait.outputs.handover != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
@@ -85,8 +117,8 @@ jobs:
           if-no-files-found: ignore
 
   afternoon:
-    needs: morning
-    if: ${{ !cancelled() && (github.event_name == 'schedule' || inputs.mode == 'day') }}
+    needs: [wait, morning]
+    if: ${{ !cancelled() && needs.wait.outputs.handover != 'true' && (github.event_name == 'schedule' || inputs.mode == 'day') }}
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
@@ -111,3 +143,13 @@ jobs:
           name: day-${{ github.run_id }}
           path: botdata/bot/
           if-no-files-found: ignore
+      - name: Start tomorrow's run (it waits for the morning)
+        if: ${{ !cancelled() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for try in 1 2 3 4 5; do
+            gh workflow run trading-day.yml -R "$GITHUB_REPOSITORY" -f mode=day && exit 0
+            sleep 30
+          done
+          exit 1
