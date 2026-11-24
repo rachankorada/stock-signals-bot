@@ -97,6 +97,7 @@ class NewsFeed:
         self.known = set()           # tickers already caught up
         self._since = (None, None)   # (date, previous session close)
         self.error = None
+        self.current = {}            # ticker -> news score now, read by the signal engine
 
     def since(self) -> pd.Timestamp:
         """The previous session's close: the start of the window a news score covers."""
@@ -127,6 +128,7 @@ class NewsFeed:
         start = (self.last_poll - OVERLAP) if self.last_poll is not None else self.since()
         fresh += store(fetch(symbols, start, now))
         self.last_poll = now
+        self.current = {t["symbol"]: t["score"] for t in ticker_scores(symbols, self.since())}
         self.known &= set(symbols)   # a ticker dropped by everyone is caught up again if it comes back
         return fresh
 

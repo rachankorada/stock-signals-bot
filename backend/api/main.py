@@ -107,6 +107,7 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(runner.run()) if live else None
     # The news scorer runs around the clock, market open or not
     news_feed = NewsFeed(hub.dispatch_news)
+    engine.news_score = lambda sym: news_feed.current.get(sym, 0.0)   # news moves signal confidence
     news_task = asyncio.create_task(news_feed.run()) if os.environ.get("NEWS", "on") != "off" else None
     yield
     for t in (task, news_task):

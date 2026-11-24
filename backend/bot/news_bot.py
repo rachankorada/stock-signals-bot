@@ -32,10 +32,12 @@ from backend.features.news import NEGATIVE, POSITIVE
 
 log = logging.getLogger("news")
 
-CONF_STEP = 0.05        # confidence change at full agreement
-SIZE_STEP = 0.5         # size change at full agreement
-SIZE_MIN, SIZE_MAX = 0.5, 1.5
-CAUTION_AT = -0.6       # this much against the trade: cut to CAUTION_SIZE
+# Heavy influence, as asked on 2026-11-23 (a one-day replay and the backtest did not show news helping;
+# the report's "with and without news" lines are there to judge it)
+CONF_STEP = 0.15        # confidence change at full agreement: decides which setups are posted
+SIZE_STEP = 1.0         # size change at full agreement
+SIZE_MIN, SIZE_MAX = 0.25, 2.0
+CAUTION_AT = -0.4       # this much against the trade: cut to CAUTION_SIZE
 CAUTION_SIZE = 0.25
 LEVELS = ((0.6, "strong"), (0.35, "moderate"), (0.15, "weak"))
 
@@ -119,8 +121,9 @@ def adjust(sig: dict, table: pd.DataFrame) -> dict:
     """How the news steers one signal."""
     score = float(table["score"].get(sig["symbol"], 0.0)) if table is not None and len(table) else 0.0
     a = sig["direction"] * score
+    # the engine has already moved the signal's confidence by the news (Engine.news_score)
     return {"score": score, "agreement": a, "strength": strength(score), "size": size_for(a),
-            "confidence": float(sig.get("confidence", 0)) + CONF_STEP * a}
+            "confidence": float(sig.get("confidence", 0))}
 
 
 def code(a: float) -> str:

@@ -79,9 +79,19 @@ def make_pool():
     return pool
 
 
+def news_reason(news: float, direction: int) -> list:
+    from backend.bot.news_bot import strength
+    level = strength(news)
+    if level == "none":
+        return []
+    return [f"{level.capitalize()} {'positive' if news > 0 else 'negative'} news "
+            f"({'with' if news * direction > 0 else 'against'} this trade)"]
+
+
 class Engine:
     def __init__(self, pool=None):
         self.pool = pool  # optional process pool; scans run inline without one
+        self.news_score = None   # optional callable(symbol) -> news score in [-1, 1]; moves confidence
         self.bars: dict[str, pd.DataFrame] = {}
         self.models: dict[int, tuple] = {}
         self.last_scan: str | None = None
@@ -164,6 +174,10 @@ class Engine:
         ds["stop_atr"], ds["cost_r"] = risk / atr, cost_r
         ds["n_agree"] = setups.groupby("direction")["strategy"].transform("count").to_numpy()
         conf = model.predict(ds)
+        news = float(self.news_score(sym) or 0.0) if self.news_score else 0.0
+        if news:   # news agreeing with a setup raises its confidence, news against lowers it
+            from backend.bot.news_bot import CONF_STEP
+            conf = conf + CONF_STEP * d * news
 
         # A setup is validated when its timeframe and strategy passed the go-live gate
         p_min = meta.get("p_min")
@@ -195,7 +209,8 @@ class Engine:
             "entry_max": round(entry + direction * 0.25 * r, 4),
             "stop": round(float(stop[pick]), 4), "tp1": round(float(tp1[pick]), 4),
             "tp2": round(float(tp2[pick]), 4), "risk": round(r, 4), "cost_r": round(float(cost_r[pick]), 4),
-            "confidence": round(float(conf[pick]), 4), "reasons": describe(last, direction),
+            "confidence": round(float(conf[pick]), 4),
+            "reasons": describe(last, direction) + news_reason(news, direction),
             "history": meta.get("history", {}).get(strategy, {}), "validated": int(bool(validated[pick])),
             "status": "active", "created_at": iso(now), "expires_at": iso(expires), "checked_until": iso(now),
         }

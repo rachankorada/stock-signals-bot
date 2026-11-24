@@ -103,6 +103,9 @@ def run(until: str = None):
             table.to_csv(DIR / f"news_{today:%Y-%m-%d}.csv")
         return table
     news = read_news("news since the last close")
+    current = {"table": news}
+    engine.news_score = lambda sym: (float(current["table"]["score"].get(sym, 0.0))
+                                     if current["table"] is not None else 0.0)
 
     done = {"scan": prep is None or not INPLAY_ON, "window": False, "cancel": False, "flatten": False}
     while True:
@@ -126,6 +129,7 @@ def run(until: str = None):
         if boundary.minute % 15 == 14:   # fresh news one minute before each 15-minute signal check
             fresh = read_news(f"news at {boundary:%H:%M}")
             news = fresh if fresh is not None else news
+            current["table"] = news
 
         # Every minute: update the signal engine and act on what it says
         try:

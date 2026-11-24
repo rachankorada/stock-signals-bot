@@ -100,6 +100,7 @@ def place(trading: TradingClient, sig: dict, equity: float, news: pd.DataFrame =
     adj = news_bot.adjust(sig, news)
     base = shares(sig["risk"], sig["entry"], equity, MAX_POSITION_FRAC, one_share_up_to=0.25)
     qty = int(base * adj["size"]) if base >= 1 else base
+    qty = min(qty, int(MAX_POSITION_FRAC * 2 * equity / sig["entry"])) if base >= 1 else qty   # 2x size: at most 20% of the account
     if base >= 1 and qty < 1:
         qty = 1
     if qty < 1:
