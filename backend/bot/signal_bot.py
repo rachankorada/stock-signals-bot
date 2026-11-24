@@ -28,6 +28,7 @@ from alpaca.trading.requests import (GetCalendarRequest, GetOrderByIdRequest, Ge
                                      MarketOrderRequest, StopLossRequest, TakeProfitRequest)
 
 from backend import config
+from backend.bot import news_bot
 from backend.data.alpaca_data import ET
 
 PREFIX = "sig"
@@ -49,10 +50,21 @@ def trading_client() -> TradingClient:
     return TradingClient(config.ALPACA_API_KEY, config.ALPACA_SECRET_KEY, paper=True)  # paper account only, always
 
 
-def order_id(sig: dict) -> str:
+def id_stem(sig: dict) -> str:
     # The signal's time leads its number, so a restarted run (whose numbers start again at 1) cannot reuse an id
     at = pd.Timestamp(sig["created_at"]).tz_convert(ET)
-    return f"{PREFIX}-{at:%Y%m%d}-{at:%H%M}{sig['id']:04d}-{sig['timeframe']}-{int(round(sig['risk'] * 10000))}"
+    return f"{PREFIX}-{at:%Y%m%d}-{at:%H%M}{sig['id']:04d}-{sig['timeframe']}-"
+
+
+def order_id(sig: dict, news_code: str = None) -> str:
+    """sig-<day>-<time+number>-<timeframe>-[<news agreement>-]<risk in 1/10000ths>"""
+    return id_stem(sig) + (f"{news_code}-" if news_code else "") + str(int(round(sig["risk"] * 10000)))
+
+
+def parse_id(cid: str) -> dict:
+    parts = cid.split("-")
+    return {"signal": int(parts[2]), "timeframe": int(parts[3]), "risk": int(parts[-1]) / 10000,
+            "news": news_bot.decode(parts[4]) if len(parts) == 6 else None}
 
 
 def day_orders(trading: TradingClient, today: pd.Timestamp, status=QueryOrderStatus.ALL, symbol=None) -> list:
@@ -79,12 +91,17 @@ def shares(risk_per_share: float, price: float, equity: float, cap_frac: float, 
     return 1 if qty < 1 and price <= one_share_up_to * equity else qty
 
 
-def place(trading: TradingClient, sig: dict, equity: float):
-    """Enter a new signal at market with its stop and first target attached."""
+def place(trading: TradingClient, sig: dict, equity: float, news: pd.DataFrame = None):
+    """Enter a new signal at market with its stop and first target attached. The ticker's news score
+    (news_bot) scales the size and adjusts the confidence shown."""
     sym, d = sig["symbol"], sig["direction"]
     if sig["timeframe"] not in config.BOT_TIMEFRAMES:
         return
-    qty = shares(sig["risk"], sig["entry"], equity, MAX_POSITION_FRAC, one_share_up_to=0.25)
+    adj = news_bot.adjust(sig, news)
+    base = shares(sig["risk"], sig["entry"], equity, MAX_POSITION_FRAC, one_share_up_to=0.25)
+    qty = int(base * adj["size"]) if base >= 1 else base
+    if base >= 1 and qty < 1:
+        qty = 1
     if qty < 1:
         log.info("signal %s %s: size rounds to zero, skipped", sig["id"], sym)
         return
@@ -106,12 +123,15 @@ def place(trading: TradingClient, sig: dict, equity: float):
             # stop and target still working
             symbol=sym, qty=qty, side=OrderSide.BUY if d > 0 else OrderSide.SELL, time_in_force=TimeInForce.GTC,
             limit_price=round(sig["entry"] + d * ENTRY_CHASE_R * sig["risk"], 2),
-            order_class=OrderClass.BRACKET, client_order_id=order_id(sig),
+            order_class=OrderClass.BRACKET, client_order_id=order_id(sig, news_bot.code(adj["agreement"])),
             take_profit=TakeProfitRequest(limit_price=round(sig["tp1"], 2)),
             stop_loss=StopLossRequest(stop_price=round(sig["stop"], 2))))
-        log.info("signal %s: %s %d %s (%dm, %.0f%% confidence) entry ~%.2f stop %.2f target %.2f", sig["id"],
+        log.info("signal %s: %s %d %s (%dm, %.0f%% confidence, %.0f%% with news) entry ~%.2f stop %.2f target %.2f; "
+                 "news %s %+.2f, %s the trade, size %.2fx", sig["id"],
                  "BUY" if d > 0 else "SHORT", qty, sym, sig["timeframe"], sig["confidence"] * 100,
-                 sig["entry"], sig["stop"], sig["tp1"])
+                 adj["confidence"] * 100, sig["entry"], sig["stop"], sig["tp1"], adj["strength"], adj["score"],
+                 "with" if adj["agreement"] > 0 else "against" if adj["agreement"] < 0 else "no bearing on",
+                 adj["size"])
     except Exception as exc:
         log.warning("signal %s %s: order rejected: %s", sig["id"], sym, str(exc)[:200])
 
@@ -179,10 +199,10 @@ def close_out(trading: TradingClient, parent):
 
 def finish(trading: TradingClient, sig: dict):
     """The site says this signal is over."""
-    cid = order_id(sig)
+    stem = id_stem(sig)
     today = pd.Timestamp(sig["created_at"]).tz_convert(ET).tz_localize(None).normalize()
     for parent in day_orders(trading, today, symbol=sig["symbol"]):
-        if parent.client_order_id == cid:
+        if (parent.client_order_id or "").startswith(stem):
             try:
                 close_out(trading, parent)
                 log.info("signal %s %s ended (%s)", sig["id"], sig["symbol"], sig["status"])
@@ -197,10 +217,10 @@ def at_day_end(sig: dict) -> bool:
     return closed.hour * 60 + closed.minute >= 16 * 60 - config.FLATTEN_BEFORE_CLOSE_MIN
 
 
-def handle(trading: TradingClient, event: dict, equity: float):
+def handle(trading: TradingClient, event: dict, equity: float, news: pd.DataFrame = None):
     sig = event["signal"]
     if event["type"] == "signal":
-        place(trading, sig, equity)
+        place(trading, sig, equity, news)
     elif sig.get("closed_at"):
         if sig["status"] == "expired" and at_day_end(sig):
             log.info("signal %s %s: no level hit by the close, held overnight with its stop and target", sig["id"], sig["symbol"])
@@ -237,21 +257,24 @@ def day_trades(trading: TradingClient, today: pd.Timestamp) -> pd.DataFrame:
         cid = o.client_order_id or ""
         if not cid.startswith(PREFIX + "-") or float(o.filled_qty or 0) == 0:
             continue
-        _, _, sig_id, tf, code = cid.split("-")
+        ids = parse_id(cid)
         d = 1 if o.side == OrderSide.BUY else -1
         closes = [x for x in list(o.legs or []) + ([exits[cid]] if cid in exits else []) if float(x.filled_qty or 0) > 0]
         closed_qty = sum(float(x.filled_qty) for x in closes)
         if abs(closed_qty - float(o.filled_qty)) > 1e-6:
             continue  # still open, or not fully closed
-        entry, qty, risk = float(o.filled_avg_price), float(o.filled_qty), int(code) / 10000
+        entry, qty, risk = float(o.filled_avg_price), float(o.filled_qty), ids["risk"]
         exit_px = sum(float(x.filled_qty) * float(x.filled_avg_price) for x in closes) / closed_qty
         how = "market exit" if cid in exits and float(exits[cid].filled_qty or 0) > 0 else (
             "target" if d * (exit_px - entry) > 0 else "stop")
         pnl = d * (exit_px - entry) * qty
-        rows.append({"day": f"{today:%Y-%m-%d}", "signal": int(sig_id), "symbol": o.symbol, "timeframe": int(tf),
+        a = ids["news"]
+        size = news_bot.size_for(a) if a is not None else 1.0
+        rows.append({"day": f"{today:%Y-%m-%d}", "signal": ids["signal"], "symbol": o.symbol, "timeframe": ids["timeframe"],
                      "direction": d, "qty": qty, "entry_time": pd.Timestamp(o.filled_at).tz_convert(ET).strftime("%H:%M:%S"),
                      "entry": round(entry, 4), "exit": round(exit_px, 4), "how": how, "pnl": round(pnl, 2),
-                     "r": round(pnl / (qty * risk), 3)})
+                     "r": round(pnl / (qty * risk), 3), "news": a, "size": size,
+                     "pnl_without_news": round(pnl / size, 2)})
     return pd.DataFrame(rows)
 
 
@@ -283,6 +306,14 @@ def report(trading: TradingClient = None, show_trades: bool = True):
     for how, g in t.groupby("how"):
         print(f"  {how}: {summary(g)}")
     print(f"Signal follower total: {summary(t)}")
+    n = t[t["news"].notna()]
+    if len(n):
+        group = pd.cut(n["news"], [-1.01, -0.15, 0.15, 1.01], labels=["news against", "no clear news", "news with"])
+        print("Signal follower, by the news at entry:")
+        for g, x in n.groupby(group, observed=True):
+            print(f"  {g}: {summary(x)}")
+        print(f"News adjustments: P&L ${n['pnl'].sum():,.2f} with them, ${n['pnl_without_news'].sum():,.2f} "
+              f"at normal size ({len(n)} trades)")
 
 
 if __name__ == "__main__":

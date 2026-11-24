@@ -29,7 +29,7 @@ import pandas as pd
 from alpaca.trading.requests import GetCalendarRequest
 
 from backend import config, db
-from backend.bot import inplay_bot, signal_bot
+from backend.bot import inplay_bot, news_bot, signal_bot
 from backend.data.alpaca_data import ET
 from backend.engine.core import Engine, make_pool
 from backend.engine.live import LiveRunner
@@ -94,6 +94,16 @@ def run(until: str = None):
     symbols = config.BOT_TICKERS
     log.info("signal engine ready: %d tickers, models for %s", len(symbols), sorted(engine.models))
 
+    # News since the last close, read before the open and again every 15 minutes; it steers each signal
+    news_since = guarded("news window", news_bot.window_start, trading, today) or opens - pd.Timedelta(hours=17, minutes=30)
+    def read_news(title):
+        table = guarded("news scores", news_bot.scores, symbols, news_since)
+        if table is not None:
+            news_bot.show(table, title)
+            table.to_csv(DIR / f"news_{today:%Y-%m-%d}.csv")
+        return table
+    news = read_news("news since the last close")
+
     done = {"scan": prep is None or not INPLAY_ON, "window": False, "cancel": False, "flatten": False}
     while True:
         boundary = now().floor("min") + pd.Timedelta(minutes=1)
@@ -113,6 +123,10 @@ def run(until: str = None):
             else:
                 log.info("too late for today's stocks-in-play entries")
 
+        if boundary.minute % 15 == 14:   # fresh news one minute before each 15-minute signal check
+            fresh = read_news(f"news at {boundary:%H:%M}")
+            news = fresh if fresh is not None else news
+
         # Every minute: update the signal engine and act on what it says
         try:
             live.refresh(config.CONTEXT_TICKERS + symbols, boundary)
@@ -125,7 +139,7 @@ def run(until: str = None):
             for event in engine.on_minute(boundary, symbols):
                 if halted and event["type"] == "signal":
                     continue
-                guarded("signal order", signal_bot.handle, trading, event, equity)
+                guarded("signal order", signal_bot.handle, trading, event, equity, news)
         except Exception:
             log.exception("signal engine error at %s", f"{boundary:%H:%M}")
 

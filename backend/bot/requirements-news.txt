@@ -1,0 +1,5 @@
+# FinBERT for the news scores (CPU-only PyTorch). If these fail to install or load, news_bot falls
+# back to a keyword reading of the headlines.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.15.0
+transformers==5.23.0
