@@ -64,11 +64,17 @@ jobs:
           CHUNK: ${{ inputs.wait_chunk || '330' }}
         run: |
           now=$(date -u +%s)
-          if [ "$(date -u +%u)" -le 5 ] && [ "$now" -lt "$(date -u -d 'today 20:30' +%s)" ]; then
+          # trading days from Alpaca's calendar (skips holidays like Thanksgiving); weekdays if it fails
+          days=$(curl -sf --max-time 20 -H "APCA-API-KEY-ID: $ALPACA_API_KEY" -H "APCA-API-SECRET-KEY: $ALPACA_SECRET_KEY" \
+                 "https://paper-api.alpaca.markets/v2/calendar?start=$(date -u +%F)&end=$(date -u -d '+14 day' +%F)" \
+                 | grep -o '"date":"[0-9-]*"' | cut -d'"' -f4)
+          trading_day() { if [ -n "$days" ]; then echo "$days" | grep -qx "$1"; else [ "$(date -u -d "$1" +%u)" -le 5 ]; fi; }
+          if trading_day "$(date -u +%F)" && [ "$now" -lt "$(date -u -d 'today 20:30' +%s)" ]; then
             target=$(date -u -d "today 12:25" +%s)
           else
-            for i in 1 2 3 4 5 6 7; do
-              if [ "$(date -u -d "+$i day" +%u)" -le 5 ]; then target=$(date -u -d "$(date -u -d "+$i day" +%F) 12:25" +%s); break; fi
+            for i in $(seq 1 14); do
+              d=$(date -u -d "+$i day" +%F)
+              if trading_day "$d"; then target=$(date -u -d "$d 12:25" +%s); break; fi
             done
           fi
           left=$(( target - now ))
