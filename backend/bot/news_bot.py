@@ -13,14 +13,14 @@ or two articles:
 
     score = sum(weight * article score) / (sum(weight) + 1)
 
-How a score steers a signal (a = direction x score, from -1 against to +1 with the trade):
-    signal strength   confidence + 0.05 * a
-    trade size        1 + 0.5 * a, between 0.5x and 1.5x
-    caution           strong news against the trade (a <= -0.6): 0.25x, almost sitting it out
+How a score steers a signal (a = direction x score, from -1 against to +1 with the trade). News can
+only take risk away (from 2026-11-27):
+    signal strength   confidence + 0.15 * min(a, 0)
+    trade size        1 + min(a, 0), at least 0.25x; never above 1x
+    caution           news against the trade (a <= -0.4): 0.25x, almost sitting it out
 
-The backtest found news did not improve the signals (2026-11-23), so the effect is kept moderate and
-every trade carries its news reading in its order id; the report shows results with and without
-the news adjustments, to settle it on live trades.
+The backtest found news did not improve the signals (2026-11-23). Every trade carries its news
+reading in its order id; the report shows results with and without the news adjustments.
 
 Run:  python -m backend.bot.news_bot        (today's scores, as the bot sees them now)
 """
@@ -37,11 +37,13 @@ from backend.features.news import NEGATIVE, POSITIVE
 
 log = logging.getLogger("news")
 
-# Heavy influence, as asked on 2026-11-23 (a one-day replay and the backtest did not show news helping;
-# the report's "with and without news" lines are there to judge it)
-CONF_STEP = 0.15        # confidence change at full agreement: decides which setups are posted
-SIZE_STEP = 1.0         # size change at full agreement
-SIZE_MIN, SIZE_MAX = 0.25, 2.0
+# Protective only, from 2026-11-27: news against a trade lowers its confidence and cuts its size; news
+# with a trade changes nothing. Our news model has not shown it can tell good news from bad (held-out
+# tests, and on 2026-11-25 it read "insider stock sales" as positive and made a losing trade 1.26x),
+# so it may only take risk away, never add it.
+CONF_STEP = 0.15        # confidence cut at full disagreement: decides which setups are posted
+SIZE_STEP = 1.0         # size cut per unit of disagreement
+SIZE_MIN, SIZE_MAX = 0.25, 1.0
 CAUTION_AT = -0.4       # this much against the trade: cut to CAUTION_SIZE
 CAUTION_SIZE = 0.25
 LEVELS = ((0.6, "strong"), (0.35, "moderate"), (0.15, "weak"))
@@ -188,8 +190,9 @@ def decode(c: str) -> float:
     return (1 if c[0] == "p" else -1) * int(c[1:]) / 100
 
 
-def size_for(a: float) -> float:
-    return CAUTION_SIZE if a <= CAUTION_AT else float(np.clip(1 + SIZE_STEP * a, SIZE_MIN, SIZE_MAX))
+def size_for(a: float, size_max: float = None) -> float:
+    top = SIZE_MAX if size_max is None else size_max
+    return CAUTION_SIZE if a <= CAUTION_AT else float(np.clip(1 + SIZE_STEP * a, SIZE_MIN, top))
 
 
 def show(table: pd.DataFrame, title: str):

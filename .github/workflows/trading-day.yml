@@ -32,6 +32,7 @@ on:
 permissions:
   contents: read
   actions: write   # each day's run starts the next one (GitHub's own schedule runs hours late)
+  issues: write    # problems are raised as issues, which GitHub emails to the owner
 
 concurrency:
   group: trading-day
@@ -90,6 +91,13 @@ jobs:
             done
             echo "handover=true" >> "$GITHUB_OUTPUT"
           fi
+      - uses: actions/checkout@v7
+        if: failure()
+      - name: Alert
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/scripts/alert.sh "Bot problem on $(TZ=America/New_York date +%F)" "The wait job failed, so the next trading run may not start."
 
   morning:
     needs: wait
@@ -131,6 +139,13 @@ jobs:
           name: morning-${{ github.run_id }}
           path: botdata/bot/
           if-no-files-found: ignore
+      - name: Alert
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash .github/scripts/alert.sh "Bot problem on $(TZ=America/New_York date +%F)" "Morning job:
+          $(cat botdata/bot/problems.txt 2>/dev/null || echo 'the job failed; see the run log')"
 
   afternoon:
     needs: [wait, morning]
@@ -161,7 +176,9 @@ jobs:
           name: morning-${{ github.run_id }}
           path: botdata/bot/
       - name: Trade the afternoon and close out
-        run: python -m backend.bot.run_day
+        run: |
+          rm -f botdata/bot/problems.txt
+          python -m backend.bot.run_day
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -178,3 +195,10 @@ jobs:
             sleep 30
           done
           exit 1
+      - name: Alert
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash .github/scripts/alert.sh "Bot problem on $(TZ=America/New_York date +%F)" "Afternoon job (trading, closing out, or starting tomorrow's run):
+          $(cat botdata/bot/problems.txt 2>/dev/null || echo 'the job failed; see the run log')"

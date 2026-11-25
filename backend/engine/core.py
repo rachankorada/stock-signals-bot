@@ -175,9 +175,9 @@ class Engine:
         ds["n_agree"] = setups.groupby("direction")["strategy"].transform("count").to_numpy()
         conf = model.predict(ds)
         news = float(self.news_score(sym) or 0.0) if self.news_score else 0.0
-        if news:   # news agreeing with a setup raises its confidence, news against lowers it
+        if news:   # news against a setup lowers its confidence; news with it changes nothing (news_bot)
             from backend.bot.news_bot import CONF_STEP
-            conf = conf + CONF_STEP * d * news
+            conf = conf + CONF_STEP * np.minimum(d * news, 0.0)
 
         # A setup is validated when its timeframe and strategy passed the go-live gate
         p_min = meta.get("p_min")

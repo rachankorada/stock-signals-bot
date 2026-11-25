@@ -120,8 +120,8 @@ def place(trading: TradingClient, sig: dict, equity: float, news: pd.DataFrame =
         return
     try:
         trading.submit_order(LimitOrderRequest(
-            # Good till cancelled: if neither level is hit by the close, the trade is held overnight with its
-            # stop and target still working
+            # Good till cancelled only as a safety net: every trade is closed before the bell (end_of_day),
+            # and if that ever fails the stop and target keep protecting it overnight
             symbol=sym, qty=qty, side=OrderSide.BUY if d > 0 else OrderSide.SELL, time_in_force=TimeInForce.GTC,
             limit_price=round(sig["entry"] + d * ENTRY_CHASE_R * sig["risk"], 2),
             order_class=OrderClass.BRACKET, client_order_id=order_id(sig, news_bot.code(adj["agreement"])),
@@ -161,12 +161,18 @@ def cancel_stale_entries(trading: TradingClient, today: pd.Timestamp):
 
 
 def close_out(trading: TradingClient, parent):
-    """Make sure one signal's trade is finished: cancel what is left of it and exit whatever is still held."""
+    """Make sure one signal's trade is finished: cancel what is left of it and exit whatever is still held.
+    Returns True when it cancelled an entry or sent an exit, False when there was nothing left to do."""
     if parent.status.value in OPEN and float(parent.filled_qty or 0) == 0:
         trading.cancel_order_by_id(parent.id)
-        return
+        return True
     if float(parent.filled_qty or 0) == 0:
-        return
+        return False
+    if parent.status.value in OPEN:   # partly filled: stop the rest of the entry first
+        try:
+            trading.cancel_order_by_id(parent.id)
+        except Exception:
+            pass
     live = [leg for leg in (parent.legs or []) if leg.status.value in OPEN]
     for leg in live:
         try:
@@ -188,14 +194,15 @@ def close_out(trading: TradingClient, parent):
         sent = None
     if sent is not None:
         if sent.status.value in OPEN:
-            return
+            return False
         remaining -= float(sent.filled_qty or 0)
         exit_id += "b"
     if remaining < 1:
-        return
+        return False
     trading.submit_order(MarketOrderRequest(
         symbol=parent.symbol, qty=remaining, time_in_force=TimeInForce.DAY,
         side=OrderSide.SELL if parent.side == OrderSide.BUY else OrderSide.BUY, client_order_id=exit_id))
+    return True
 
 
 def finish(trading: TradingClient, sig: dict):
@@ -212,65 +219,97 @@ def finish(trading: TradingClient, sig: dict):
             return
 
 
-def at_day_end(sig: dict) -> bool:
-    """Did the site end this signal only because the trading day was ending?"""
-    closed = pd.Timestamp(sig["closed_at"]).tz_convert(ET)
-    return closed.hour * 60 + closed.minute >= 16 * 60 - config.FLATTEN_BEFORE_CLOSE_MIN
-
-
 def handle(trading: TradingClient, event: dict, equity: float, news: pd.DataFrame = None):
     sig = event["signal"]
     if event["type"] == "signal":
         place(trading, sig, equity, news)
     elif sig.get("closed_at"):
-        if sig["status"] == "expired" and at_day_end(sig):
-            log.info("signal %s %s: no level hit by the close, held overnight with its stop and target", sig["id"], sig["symbol"])
-            return
         finish(trading, sig)
 
 
-def end_of_day(trading: TradingClient, today: pd.Timestamp):
-    """At the close: trades still waiting on their stop or target stay open overnight. Only a position
-    left with nothing protecting it (for example after a partial fill) is closed."""
-    held = 0
-    for parent in day_orders(trading, today):
-        if not (parent.client_order_id or "").startswith(PREFIX + "-"):
-            continue
+def is_open_trade(parent) -> bool:
+    """An entry still waiting, or a filled entry whose shares are not all out yet."""
+    if parent.status.value in OPEN:
+        return True
+    filled = float(parent.filled_qty or 0)
+    out = sum(float(leg.filled_qty or 0) for leg in (parent.legs or []))
+    return filled > 0 and (out < filled or any(leg.status.value in OPEN for leg in (parent.legs or [])))
+
+
+def end_of_day(trading: TradingClient, today: pd.Timestamp, days_back: int = 0, today_too: bool = True) -> int:
+    """Day trading: before the bell every signal trade is closed at market and every waiting entry is
+    cancelled. With days_back > 0 it also closes trades left from earlier days (run at startup with
+    today_too=False: a market exit sent before the open fills at the open). Returns how many it closed."""
+    closed = 0
+    for back in range(days_back, -1 if today_too else 0, -1):
+        day = today - pd.Timedelta(days=back)
+        for parent in day_orders(trading, day):
+            if not (parent.client_order_id or "").startswith(PREFIX + "-") or not is_open_trade(parent):
+                continue
+            try:
+                if not close_out(trading, parent):
+                    continue
+                closed += 1
+                log.info("%s: signal trade from %s closed out (day trading: nothing is held overnight)",
+                         parent.symbol, f"{day:%Y-%m-%d}")
+            except Exception as exc:
+                log.warning("%s: end-of-day close-out failed: %s", parent.symbol, str(exc)[:200])
+    return closed
+
+
+def exits_for(trading: TradingClient, cid: str, orders: list) -> list:
+    """The market exits sent for one trade: found among the day's orders, or looked up by id when the
+    trade was closed on a later day."""
+    xid = cid.replace(PREFIX + "-", PREFIX + "x-", 1)
+    found = [o for o in orders if (o.client_order_id or "") in (xid, xid + "b")]
+    if found:
+        return found
+    for i in (xid, xid + "b"):
         try:
-            if parent.status.value in OPEN and float(parent.filled_qty or 0) == 0:
-                trading.cancel_order_by_id(parent.id)
-            elif any(leg.status.value in OPEN for leg in (parent.legs or [])):
-                held += 1
-            else:
-                close_out(trading, parent)  # exits any unprotected remainder
-        except Exception as exc:
-            log.warning("%s: end-of-day check failed: %s", parent.symbol, str(exc)[:200])
-    log.info("%d signal trades held overnight with their stop and target working", held)
+            found.append(trading.get_order_by_client_id(i))
+        except Exception:
+            pass
+    return found
 
 
-def day_trades(trading: TradingClient, today: pd.Timestamp) -> pd.DataFrame:
-    """One row per followed signal, from the account's actual fills."""
+def day_trades(trading: TradingClient, today: pd.Timestamp, open_too: bool = False) -> pd.DataFrame:
+    """One row per followed signal entered that day, from the account's actual fills. With open_too,
+    trades not yet closed are included, valued at the current price (how = "open")."""
     orders = day_orders(trading, today)
-    exits = {o.client_order_id.replace(PREFIX + "x-", PREFIX + "-", 1): o for o in orders
-             if (o.client_order_id or "").startswith(PREFIX + "x-")}
-    rows = []
+    rows, prices = [], None
     for o in orders:
         cid = o.client_order_id or ""
         if not cid.startswith(PREFIX + "-") or float(o.filled_qty or 0) == 0:
             continue
         ids = parse_id(cid)
         d = 1 if o.side == OrderSide.BUY else -1
-        closes = [x for x in list(o.legs or []) + ([exits[cid]] if cid in exits else []) if float(x.filled_qty or 0) > 0]
+        xs = [x for x in exits_for(trading, cid, orders) if float(x.filled_qty or 0) > 0]
+        closes = [x for x in list(o.legs or []) + xs if float(x.filled_qty or 0) > 0]
         closed_qty = sum(float(x.filled_qty) for x in closes)
         if abs(closed_qty - float(o.filled_qty)) > 1e-6:
-            continue  # still open, or not fully closed
+            if not open_too:
+                continue  # still open, or not fully closed
+            if prices is None:
+                prices = {p.symbol: float(p.current_price) for p in trading.get_all_positions()}
+            if o.symbol not in prices:
+                continue
+            # value what is still held at the current price
+            left = float(o.filled_qty) - closed_qty
+            closes = closes + [type("Now", (), {"filled_qty": left, "filled_avg_price": prices[o.symbol]})()]
+            closed_qty = float(o.filled_qty)
+            xs = []
+            still_open = True
+        else:
+            still_open = False
         entry, qty, risk = float(o.filled_avg_price), float(o.filled_qty), ids["risk"]
         exit_px = sum(float(x.filled_qty) * float(x.filled_avg_price) for x in closes) / closed_qty
-        how = "market exit" if cid in exits and float(exits[cid].filled_qty or 0) > 0 else (
+        how = "open" if still_open else "market exit" if xs else (
             "target" if d * (exit_px - entry) > 0 else "stop")
         pnl = d * (exit_px - entry) * qty
         a = ids["news"]
-        size = news_bot.size_for(a) if a is not None else 1.0
+        # sizes up to 2x were allowed before news became protective only
+        size = (news_bot.size_for(a, 2.0 if today < pd.Timestamp("2026-11-27") else news_bot.SIZE_MAX)
+                if a is not None else 1.0)
         rows.append({"day": f"{today:%Y-%m-%d}", "signal": ids["signal"], "symbol": o.symbol, "timeframe": ids["timeframe"],
                      "direction": d, "qty": qty, "entry_time": pd.Timestamp(o.filled_at).tz_convert(ET).strftime("%H:%M:%S"),
                      "entry": round(entry, 4), "exit": round(exit_px, 4), "how": how, "pnl": round(pnl, 2),
@@ -289,11 +328,21 @@ def report(trading: TradingClient = None, show_trades: bool = True):
     today = pd.Timestamp.now(tz=ET).tz_localize(None).normalize()
     days = [] if today < pd.Timestamp(FIRST_DAY) else [pd.Timestamp(d.date) for d in trading.get_calendar(
         GetCalendarRequest(start=pd.Timestamp(FIRST_DAY).date(), end=today.date()))]
-    parts = [p for p in (day_trades(trading, d) for d in days) if len(p)]
+    parts = [p for p in (day_trades(trading, d, open_too=True) for d in days) if len(p)]
     if not parts:
+        print("Signal follower: no trades yet.")
+        return
+    allt = pd.concat(parts, ignore_index=True)
+    held = allt[allt["how"] == "open"]
+    if len(held):
+        print("Signal follower, still open (valued at the current price, not in the totals below):")
+        for r in held.itertuples():
+            print(f"  {r.day} {r.symbol:6s} {'LONG ' if r.direction > 0 else 'SHORT'} {r.qty:>6.0f} shares  "
+                  f"entry {r.entry:.2f}  now {r.exit:.2f}  P&L ${r.pnl:+,.2f}  ({r.r:+.2f}R)")
+    t = allt[allt["how"] != "open"]
+    if not len(t):
         print("Signal follower: no completed trades yet.")
         return
-    t = pd.concat(parts, ignore_index=True)
     if show_trades:
         print(t.to_string(index=False))
         print()

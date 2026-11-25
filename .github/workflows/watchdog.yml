@@ -1,0 +1,57 @@
+# Checks during market hours that the trading bot is actually trading. If no trading-day run has its
+# morning or afternoon job going, it starts one (the bot picks the day up from wherever it is) and opens
+# an alert issue, which GitHub emails to the repo owner. GitHub's schedule can run late; a check that
+# lands outside the session does nothing.
+name: watchdog
+
+on:
+  schedule:
+    - cron: "50 14 * * 1-5"   # 09:50 ET in winter, 10:50 ET in summer
+    - cron: "20 18 * * 1-5"   # 13:20 ET in winter, 14:20 ET in summer
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: Is the bot trading?
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_SECRET_KEY: ${{ secrets.ALPACA_SECRET_KEY }}
+        run: |
+          today=$(TZ=America/New_York date +%F)
+          cal=$(curl -sf --max-time 20 -H "APCA-API-KEY-ID: $ALPACA_API_KEY" -H "APCA-API-SECRET-KEY: $ALPACA_SECRET_KEY" \
+                "https://paper-api.alpaca.markets/v2/calendar?start=$today&end=$today")
+          if ! echo "$cal" | grep -q "\"date\":\"$today\""; then echo "market closed today"; exit 0; fi
+          open=$(echo "$cal" | grep -o '"open":"[0-9:]*"' | cut -d'"' -f4)
+          close=$(echo "$cal" | grep -o '"close":"[0-9:]*"' | cut -d'"' -f4)
+          now=$(TZ=America/New_York date +%s)
+          o=$(TZ=America/New_York date -d "$today $open" +%s); c=$(TZ=America/New_York date -d "$today $close" +%s)
+          if [ "$now" -lt $(( o + 900 )) ] || [ "$now" -gt $(( c - 900 )) ]; then echo "outside the session"; exit 0; fi
+          # a run whose morning or afternoon job is going
+          busy=0
+          for id in $(gh run list -R "$GITHUB_REPOSITORY" --workflow trading-day.yml --status in_progress --json databaseId --jq '.[].databaseId'); do
+            n=$(gh run view "$id" -R "$GITHUB_REPOSITORY" --json jobs \
+                --jq '[.jobs[] | select((.name == "morning" or .name == "afternoon") and (.status == "in_progress" or .status == "queued"))] | length')
+            [ "$n" -gt 0 ] && busy=1
+          done
+          if [ "$busy" = 1 ]; then echo "the bot is trading"; exit 0; fi
+          echo "the bot is NOT trading: starting it"
+          # a run still in its wait job during the session is waiting for the wrong day and holds the
+          # queue: cancel it so the new run can start at once
+          for id in $(gh run list -R "$GITHUB_REPOSITORY" --workflow trading-day.yml --status in_progress --json databaseId --jq '.[].databaseId'); do
+            echo "cancelling stuck run $id"
+            gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$id/force-cancel" >/dev/null || true
+          done
+          sleep 20
+          gh workflow run trading-day.yml -R "$GITHUB_REPOSITORY" -f mode=day || true
+          bash .github/scripts/alert.sh "Bot was not running on $today" \
+            "The watchdog found no trading run during market hours at $(TZ=America/New_York date +%H:%M) ET, cancelled any stuck run and started a new one. Check the new run is trading."

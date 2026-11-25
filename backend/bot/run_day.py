@@ -8,8 +8,9 @@
 Stocks in play is OFF unless the environment sets INPLAY=on (since 2026-11-20 the bot follows the
 site's signals only); leftover stocks-in-play shares are still closed either way.
 
-Stocks-in-play trades are closed five minutes before the bell; signal trades that have hit neither
-level are held overnight with their stop and target working. The run can be cut in two
+Day trading, from 2026-11-27: no new signal trades in the last 90 minutes (45 on half days), and
+every trade is closed five minutes before the bell (a second pass at two minutes catches stragglers).
+Anything an earlier day left open is closed at the next open. The run can be cut in two
 (`--until 12:30`, then a second run for the afternoon); open signals are kept
 in a small database file that the second run picks up.
 
@@ -38,6 +39,26 @@ DIR = inplay_bot.DIR
 log = logging.getLogger("day")
 INPLAY_ON = os.environ.get("INPLAY", "off").lower() == "on"
 DAILY_LOSS_LIMIT = 0.03   # no new signal trades once equity is this far below the previous close
+LAST_ENTRY_MIN = 90       # no new signal trades this close to the bell (a 15-minute target needs time)
+LAST_ENTRY_MIN_SHORT = 45 # the same on half days (13:00 close)
+
+
+class Problems(logging.Handler):
+    """Counts errors (and the warnings listed in ALERT_ON) so the run can end with a failure code, which
+    makes the workflow open an alert issue."""
+    ALERT_ON = ("still holding after the close", "second pass", "close-out failed")
+
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.seen = []
+
+    def emit(self, record):
+        msg = record.getMessage()
+        if record.levelno >= logging.ERROR or any(k in msg for k in self.ALERT_ON):
+            self.seen.append(f"{record.name}: {msg[:200]}")
+
+
+PROBLEMS = Problems()
 
 
 def now() -> pd.Timestamp:
@@ -54,7 +75,7 @@ def guarded(label: str, fn, *args):
 
 def run(until: str = None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s",
-                        handlers=[logging.StreamHandler(), logging.FileHandler(DIR / f"day_{now():%Y-%m-%d}.log")])
+                        handlers=[logging.StreamHandler(), logging.FileHandler(DIR / f"day_{now():%Y-%m-%d}.log"), PROBLEMS])
     for noisy in ("httpx", "urllib3", "alpaca"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
     if hasattr(ctypes, "windll"):   # keep a Windows PC from idling to sleep while this process runs
@@ -77,8 +98,14 @@ def run(until: str = None):
     halted = False
     log.info("paper account equity $%.2f; session %s to %s ET", equity, f"{opens:%H:%M}", f"{closes:%H:%M}")
 
-    # Stocks in play never holds overnight: exit anything a failed close-out left behind
+    # Nothing is held overnight: exit anything a failed close-out (or an older version of the bot) left
+    # behind; exits sent before the open fill at the open
     guarded("stocks-in-play leftovers", inplay_bot.close_leftovers, trading, today)
+    guarded("earlier signal trades", signal_bot.end_of_day, trading, today, 10, False)
+    # No new signal trades in the last stretch of the session: too little time to reach the target
+    last_entry = closes - timedelta(minutes=LAST_ENTRY_MIN if closes - opens >= timedelta(hours=6) else LAST_ENTRY_MIN_SHORT)
+    log.info("new signal trades until %s ET; everything closed by %s ET", f"{last_entry:%H:%M}",
+             f"{closes - timedelta(minutes=5):%H:%M}")
 
     # Stocks in play: the baseline must be ready before 09:35
     scan_at = opens + timedelta(minutes=5)
@@ -113,6 +140,9 @@ def run(until: str = None):
         time.sleep(max((boundary - now()).total_seconds() + 2, 0))
         if boundary <= opens:
             continue
+        if not done.get("earlier"):   # once the market is open, retry any earlier-day exit the pre-market pass missed
+            done["earlier"] = True
+            guarded("earlier signal trades", signal_bot.end_of_day, trading, today, 10, False)
 
         # 09:35: stocks in play goes first, its orders are the time-critical ones
         if not done["scan"] and boundary >= scan_at:
@@ -141,7 +171,10 @@ def run(until: str = None):
                     log.warning("equity $%.2f is %.0f%% below the previous close: no new signal trades today "
                                 "(open ones keep their stops and targets)", now_equity, DAILY_LOSS_LIMIT * 100)
             for event in engine.on_minute(boundary, symbols):
-                if halted and event["type"] == "signal":
+                if event["type"] == "signal" and (halted or boundary > last_entry):
+                    if not halted:
+                        log.info("signal %s %s posted after %s ET: not traded (too close to the bell)",
+                                 event["signal"]["id"], event["signal"]["symbol"], f"{last_entry:%H:%M}")
                     continue
                 guarded("signal order", signal_bot.handle, trading, event, equity, news)
         except Exception:
@@ -160,7 +193,13 @@ def run(until: str = None):
         if not done["flatten"] and boundary >= closes - timedelta(minutes=5):
             done["flatten"] = True
             guarded("stocks-in-play close-out", inplay_bot.flatten, trading, inplay_bot.plan_from_orders(trading, today), today)
-            guarded("signal end of day", signal_bot.end_of_day, trading, today)
+            n = guarded("signal end of day", signal_bot.end_of_day, trading, today)
+            log.info("end of day: %s signal trades closed out", n or 0)
+        if not done.get("recheck") and boundary >= closes - timedelta(minutes=2):
+            done["recheck"] = True   # second pass, while the market is still open, for anything the first missed
+            n = guarded("signal end of day (second pass)", signal_bot.end_of_day, trading, today)
+            if n:
+                log.warning("end of day, second pass: %d signal trades still open were closed out", n)
         if boundary >= closes:
             break
         if stop_at is not None and boundary >= stop_at:
@@ -168,8 +207,11 @@ def run(until: str = None):
             return
 
     time.sleep(45)
-    guarded("signal end of day", signal_bot.end_of_day, trading, today)
-    guarded("stocks-in-play results", inplay_bot.record, trading, inplay_bot.plan_from_orders(trading, today), today)
+    left = guarded("positions check", lambda: [p.symbol for p in trading.get_all_positions()])
+    if left:
+        log.warning("still holding after the close: %s (their stops and targets stay on; closed at the next open)", left)
+    if INPLAY_ON:
+        guarded("stocks-in-play results", inplay_bot.record, trading, inplay_bot.plan_from_orders(trading, today), today)
     posted = db.query("SELECT COUNT(*) AS n, AVG(result_r) AS r FROM signals WHERE result_r IS NOT NULL")[0]
     log.info("site's own scoring of today's signals: %s finished, average %sR", posted["n"],
              None if posted["r"] is None else round(posted["r"], 3))
@@ -236,3 +278,7 @@ if __name__ == "__main__":
         report()
     else:
         run(args[args.index("--until") + 1] if "--until" in args else None)
+        if PROBLEMS.seen:
+            (DIR / "problems.txt").write_text("\n".join(PROBLEMS.seen[:50]))
+            print(f"\n{len(PROBLEMS.seen)} problems this run (see above); failing the job so an alert goes out")
+            sys.exit(1)
