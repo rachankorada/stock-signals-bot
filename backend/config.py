@@ -35,8 +35,12 @@ TRAIN_TICKERS = [
     "AVGO", "V", "CVX", "HD", "KO",                                            # added 2026-11-18 (30 in all)
 ]
 CONTEXT_TICKERS = ["SPY", "QQQ"]
-# The paper bot trades only tickers the models were trained and backtested on
-BOT_TICKERS = list(TRAIN_TICKERS)
+# Added 2026-11-25 for more signals across sectors (backend/research/more_tickers.py): liquid names whose
+# daily returns correlate at most 0.6 with any ticker already in, and whose IEX feed (what the live engine
+# reads) covers at least 85% of minutes. Not used in training: on them the 15-minute model backtests at
+# about 0R after costs over two years, in line with its honest walk-forward result on the original 30.
+EXTRA_BOT_TICKERS = ["SLB", "KMI", "FCX", "CMG", "KR", "MO", "ABT", "NEE", "CMCSA", "O"]
+BOT_TICKERS = list(TRAIN_TICKERS) + EXTRA_BOT_TICKERS
 # Timeframes the paper bot follows. Every timeframe loses in the backtest (IEX-trained, 30 tickers, after
 # costs: 3m -0.14R, 5m -0.11R, 15m -0.05R), so the bot keeps only the least negative, as a live test of the
 # site's signals at small cost; its edge is meant to come from stocks in play.
