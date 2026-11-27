@@ -13,7 +13,8 @@ or two articles:
 
     score = sum(weight * article score) / (sum(weight) + 1)
 
-How a score steers a signal (a = direction x score, from -1 against to +1 with the trade). News can
+Routine filings (insider sales, fund holdings) score 0, and only moderate or strong scores (|score| >= 0.35)
+steer a signal (from 2026-11-30). How a score steers a signal (a = direction x score, from -1 against to +1 with the trade). News can
 only take risk away (from 2026-11-27):
     signal strength   confidence + 0.15 * min(a, 0)
     trade size        1 + min(a, 0), at least 0.25x; never above 1x
@@ -25,6 +26,7 @@ reading in its order id; the report shows results with and without the news adju
 Run:  python -m backend.bot.news_bot        (today's scores, as the bot sees them now)
 """
 import logging
+import re
 
 import numpy as np
 import pandas as pd
@@ -47,6 +49,19 @@ SIZE_MIN, SIZE_MAX = 0.25, 1.0
 CAUTION_AT = -0.4       # this much against the trade: cut to CAUTION_SIZE
 CAUTION_SIZE = 0.25
 LEVELS = ((0.6, "strong"), (0.35, "moderate"), (0.15, "weak"))
+# From 2026-11-30: only moderate or strong news steers a signal; weak readings are noise (on 2026-11-27 a
+# Ford product launch read -0.29 and a Home Depot insider sale -0.16). They are still shown.
+ACT_AT = 0.35
+# Routine filings and holdings notices say nothing about the next few hours: they score 0 whatever the
+# model reads into them ("Palantir Technologies Executives Report Insider Stock Sales" read +0.26).
+ROUTINE = re.compile(
+    r"\b(insiders?\b.*\b(sales?|sells?|sold|buys?|bought|purchases?|transactions?)\b|"
+    r"(executes?|reports?) .*\b(sales?|purchases?) of .*shares|form 4\b|13[fdg]\b|schedule 13|"
+    r"threshold crossing|files? (a )?disclosure|"
+    r"(director|officer|ceo|cfo|evp|svp|chairman) (sells?|buys?|sold|bought) [\d,.$]+[km]? (worth of )?shares|"
+    r"(acquires?|buys?|takes?|opens?) (a )?new (stake|position)|"
+    r"(boosts?|raises?|increases?|lifts?|trims?|lowers?|reduces?) (its )?(stake|position|holdings?) in|"
+    r"shares? (sold|bought) by)", re.I)
 
 _finbert = None          # False once it has failed to load
 _ml = None               # our news model; False once it has failed to load
@@ -103,9 +118,20 @@ def read_articles(texts: list, times: list) -> np.ndarray:
     when it has a share, or when the news model cannot load."""
     ml = model_scores(texts, times)
     if _ml and ML_WEIGHT >= 1:
-        return ml
-    fb = _score_texts(texts)
-    return fb if not _ml else (1 - ML_WEIGHT) * fb + ML_WEIGHT * ml
+        out = ml
+    else:
+        fb = _score_texts(texts)
+        out = fb if not _ml else (1 - ML_WEIGHT) * fb + ML_WEIGHT * ml
+    return np.where([is_routine(t) for t in texts], 0.0, out)
+
+
+def is_routine(headline: str) -> bool:
+    return bool(ROUTINE.search(headline or ""))
+
+
+def acting(score: float) -> float:
+    """The part of a ticker's news score that steers signals: 0 unless it is at least moderate."""
+    return float(score) if abs(score) >= ACT_AT else 0.0
 
 
 def read_headlines(texts: list) -> np.ndarray:
@@ -174,7 +200,7 @@ def scores(symbols: list, since: pd.Timestamp, until: pd.Timestamp = None) -> pd
 def adjust(sig: dict, table: pd.DataFrame) -> dict:
     """How the news steers one signal."""
     score = float(table["score"].get(sig["symbol"], 0.0)) if table is not None and len(table) else 0.0
-    a = sig["direction"] * score
+    a = sig["direction"] * acting(score)
     # the engine has already moved the signal's confidence by the news (Engine.news_score)
     return {"score": score, "agreement": a, "strength": strength(score), "size": size_for(a),
             "confidence": float(sig.get("confidence", 0))}

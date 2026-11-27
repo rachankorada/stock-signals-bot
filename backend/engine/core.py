@@ -176,7 +176,8 @@ class Engine:
         conf = model.predict(ds)
         news = float(self.news_score(sym) or 0.0) if self.news_score else 0.0
         if news:   # news against a setup lowers its confidence; news with it changes nothing (news_bot)
-            from backend.bot.news_bot import CONF_STEP
+            from backend.bot.news_bot import CONF_STEP, acting
+            news = acting(news)
             conf = conf + CONF_STEP * np.minimum(d * news, 0.0)
 
         # A setup is validated when its timeframe and strategy passed the go-live gate
